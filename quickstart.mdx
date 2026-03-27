@@ -1,80 +1,222 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get up and running with matrix-js-sdk: install, create a client, sync, send messages, and listen for events."
+keywords: ["matrix-js-sdk", "quickstart", "createClient", "startClient", "sendEvent", "sync"]
 ---
 
-## Get started in three steps
+This guide walks you through the essential steps to build a Matrix client with `matrix-js-sdk`: installing the package, creating an authenticated client, syncing with the homeserver, sending a message, and listening for incoming events.
 
-Get your documentation site running locally and make your first customization.
+<Warning>
+  Servers supporting [MSC3916](https://github.com/matrix-org/matrix-spec-proposals/pull/3916) (Matrix 1.11) require clients to include an `Authorization` header when downloading or thumbnailing media. See the [authenticated media](#authenticated-media) section below for details.
+</Warning>
 
-### Step 1: Set up your local environment
+<Steps>
+  <Step title="Install the package">
+    Install `matrix-js-sdk` using your preferred package manager.
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    <CodeGroup>
 
-### Step 2: Deploy your changes
+    ```bash npm
+    npm install matrix-js-sdk
+    ```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash yarn
+    yarn add matrix-js-sdk
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    ```bash pnpm
+    pnpm add matrix-js-sdk
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    </CodeGroup>
 
-### Step 3: Go live
+    <Tip>
+      `pnpm` is recommended by the matrix-js-sdk project. See the [pnpm install guide](https://pnpm.io/installation#using-corepack) if you do not have it.
+    </Tip>
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Create a client">
+    Import the SDK and call `createClient` with your homeserver URL, user ID, and access token.
 
-## Next steps
+    ```javascript
+    import * as sdk from "matrix-js-sdk";
 
-Now that you have your docs running, explore these key features:
+    const myUserId = "@example:localhost";
+    const myAccessToken = "QGV4YW1wbGU6bG9jYWxob3N0.qPEvLuYfNBjxikiCjP";
 
-<CardGroup cols={2}>
+    const matrixClient = sdk.createClient({
+        baseUrl: "http://localhost:8008",
+        accessToken: myAccessToken,
+        userId: myUserId,
+    });
+    ```
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+    `createClient` automatically provisions a `MemoryStore` for event storage, a `MatrixScheduler` for message queuing, and a crypto store. All of these can be overridden via the options object.
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+    To make unauthenticated requests (for example, listing public rooms), you can create a minimal client with only `baseUrl`:
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+    ```javascript
+    import * as sdk from "matrix-js-sdk";
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+    const client = sdk.createClient({ baseUrl: "https://matrix.org" });
+    client.publicRooms(function (err, data) {
+        console.log("Public Rooms: %s", JSON.stringify(data));
+    });
+    ```
+  </Step>
 
-</CardGroup>
+  <Step title="Start syncing">
+    Call `startClient` to begin the `/sync` loop. The `initialSyncLimit` option controls how many timeline events are fetched per room on the initial sync.
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+    ```javascript
+    await matrixClient.startClient({ initialSyncLimit: 10 });
+    ```
+
+    Listen for the `ClientEvent.Sync` event to know when the initial sync is complete and the client is ready to use:
+
+    ```javascript
+    import { ClientEvent } from "matrix-js-sdk";
+
+    matrixClient.once(ClientEvent.Sync, function (state, prevState, res) {
+        if (state === "PREPARED") {
+            console.log("prepared");
+        } else {
+            console.log(state);
+            process.exit(1);
+        }
+    });
+    ```
+
+    <Info>
+      The `PREPARED` state means the initial sync has completed and all room state is available locally. Do not attempt to read room data before this event fires.
+    </Info>
+  </Step>
+
+  <Step title="Send a message">
+    Use `sendEvent` to send an `m.room.message` event to a room. Replace `"roomId"` with the actual Matrix room ID (e.g. `!abc123:localhost`).
+
+    ```javascript
+    const content = {
+        body: "message text",
+        msgtype: "m.text",
+    };
+
+    matrixClient.sendEvent("roomId", "m.room.message", content, "", (err, res) => {
+        console.log(err);
+    });
+    ```
+
+    The SDK handles local echo automatically: the message will appear in the room timeline with an `EventStatus.SENDING` status immediately, before the server response arrives.
+  </Step>
+
+  <Step title="Listen for events">
+    Subscribe to `RoomEvent.Timeline` to receive new messages across all rooms.
+
+    ```javascript
+    import { RoomEvent } from "matrix-js-sdk";
+
+    matrixClient.on(RoomEvent.Timeline, function (event, room, toStartOfTimeline) {
+        if (toStartOfTimeline) {
+            return; // don't print paginated results
+        }
+        if (event.getType() !== "m.room.message") {
+            return; // only use messages
+        }
+        console.log(
+            // the room name will update with m.room.name events automatically
+            "(%s) %s :: %s",
+            room.name,
+            event.getSender(),
+            event.getContent().body,
+        );
+    });
+    ```
+
+    The SDK emits events from `MatrixClient`, `Room`, `RoomMember`, and other objects. Some other commonly used events:
+
+    ```javascript
+    import { RoomMemberEvent, ClientEvent } from "matrix-js-sdk";
+
+    // Listen for low-level MatrixEvents
+    matrixClient.on(ClientEvent.Event, function (event) {
+        console.log(event.getType());
+    });
+
+    // Listen for typing changes
+    matrixClient.on(RoomMemberEvent.Typing, function (event, member) {
+        if (member.typing) {
+            console.log(member.name + " is typing...");
+        } else {
+            console.log(member.name + " stopped typing.");
+        }
+    });
+    ```
+  </Step>
+</Steps>
+
+## Auto-joining rooms
+
+A common pattern is to automatically accept room invitations. Listen for `RoomEvent.MyMembership` and call `joinRoom` when the membership becomes `invite`:
+
+```javascript
+import { RoomEvent, KnownMembership } from "matrix-js-sdk";
+
+matrixClient.on(RoomEvent.MyMembership, function (room, membership, prevMembership) {
+    if (membership === KnownMembership.Invite) {
+        matrixClient.joinRoom(room.roomId).then(function () {
+            console.log("Auto-joined %s", room.roomId);
+        });
+    }
+});
+
+matrixClient.startClient();
+```
+
+## Reading stored timeline events
+
+By default, `matrix-js-sdk` uses `MemoryStore` to store events as they arrive. You can iterate over the current in-memory timeline for all rooms:
+
+```javascript
+Object.keys(matrixClient.store.rooms).forEach((roomId) => {
+    matrixClient.getRoom(roomId).timeline.forEach((t) => {
+        console.log(t.event);
+    });
+});
+```
+
+## Authenticated media
+
+Servers that support MSC3916 (Matrix 1.11) require an `Authorization` header when fetching media. In Node.js environments you can construct an authenticated download URL as follows:
+
+```javascript
+const downloadUrl = matrixClient.mxcUrlToHttp(
+    /*mxcUrl=*/ "mxc://example.org/abc123",
+    /*width=*/ undefined,
+    /*height=*/ undefined,
+    /*resizeMethod=*/ undefined,
+    /*allowDirectLinks=*/ false,
+    /*allowRedirects=*/ true,  // implied supported with authentication
+    /*useAuthentication=*/ true,
+);
+
+const img = await fetch(downloadUrl, {
+    headers: {
+        Authorization: `Bearer ${matrixClient.getAccessToken()}`,
+    },
+});
+// Do something with `img`.
+```
+
+<Warning>
+  In a future release, `matrix-js-sdk` will return only authentication-required URLs, making the `Authorization` header mandatory. Web browsers may need to use [Service Workers](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API) to append the header when using media URLs in `<img />` elements.
+</Warning>
+
+## Full example
+
+The [`examples/node`](https://github.com/matrix-org/matrix-js-sdk/tree/develop/examples/node) directory in the repository contains a fully functional terminal chat client that demonstrates room listing, joining, messaging, member lists, and scrollback. To run it, edit `app.js` to set your `homeserver`, `access_token`, and `user_id`, then:
+
+```bash
+cd examples/node
+npm install
+node app
+```

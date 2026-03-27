@@ -1,0 +1,299 @@
+---
+title: 'Key backup'
+description: 'Set up and manage server-side key backups in matrix-js-sdk so users can recover encrypted message history on new devices.'
+keywords: ['key backup', 'server-side backup', 'checkKeyBackupAndEnable', 'resetKeyBackup', 'restoreKeyBackup']
+---
+
+Server-side [key backup](https://spec.matrix.org/v1.12/client-server-api/#server-side-key-backups) allows Megolm session keys to be uploaded to the homeserver in an encrypted form. When a user signs in on a new device, the key backup can be restored to decrypt historical messages.
+
+<Note>
+Key backup works best in combination with [secret storage](/guides/secret-storage). When secret storage is configured, the backup decryption key is stored there automatically, so new devices can restore the backup without manual intervention.
+</Note>
+
+## Core interfaces
+
+### KeyBackupInfo
+
+Represents the server-side key backup version, returned by `GET /_matrix/client/v3/room_keys/version`:
+
+```typescript
+export interface KeyBackupInfo {
+    algorithm: string;
+    auth_data: ISigned & (Curve25519AuthData | Aes256AuthData);
+    count?: number;   // number of keys stored in this backup
+    etag?: string;
+    version?: string; // version identifier (a number stored as a string)
+}
+```
+
+### BackupTrustInfo
+
+Indicates whether the SDK trusts a given backup version:
+
+```typescript
+export interface BackupTrustInfo {
+    /**
+     * True if there is a valid signature on the backup from a trusted device.
+     */
+    readonly trusted: boolean;
+
+    /**
+     * True if this backup matches the stored decryption key.
+     */
+    readonly matchesDecryptionKey: boolean;
+}
+```
+
+### KeyBackupCheck
+
+The result of `CryptoApi.checkKeyBackupAndEnable()`:
+
+```typescript
+export interface KeyBackupCheck {
+    backupInfo: KeyBackupInfo;
+    trustInfo: BackupTrustInfo;
+}
+```
+
+## Checking and enabling an existing backup
+
+`checkKeyBackupAndEnable()` fetches the current backup version from the server. If a trusted backup exists, it starts backing up new keys to it automatically and returns a `KeyBackupCheck`. If there is no backup, it returns `null`:
+
+```javascript
+const crypto = matrixClient.getCrypto();
+
+// Returns null if there is no backup on the server.
+const check = await crypto.checkKeyBackupAndEnable();
+
+if (check === null) {
+    console.log("No key backup found");
+} else {
+    console.log("Backup version:", check.backupInfo.version);
+    console.log("Trusted:", check.trustInfo.trusted);
+    console.log("Matches decryption key:", check.trustInfo.matchesDecryptionKey);
+}
+```
+
+## Creating a new backup
+
+If no backup exists, call `resetKeyBackup()` to create one. This also starts uploading keys to the new backup automatically:
+
+```javascript
+// Check if we have a key backup.
+// If checkKeyBackupAndEnable returns null, there is no key backup.
+const hasKeyBackup = (await crypto.checkKeyBackupAndEnable()) !== null;
+
+// Create a new backup if none exists
+if (!hasKeyBackup) {
+    await crypto.resetKeyBackup();
+}
+```
+
+`resetKeyBackup()` will:
+1. Create a new backup version on the server (replacing any existing one).
+2. Generate a new backup decryption key.
+3. Store the decryption key in secret storage (if configured).
+4. Call `checkKeyBackupAndEnable()` to activate the new backup.
+
+<Warning>
+Calling `resetKeyBackup()` replaces any existing backup. Keys in the old backup will no longer be actively maintained. Before calling this, ensure the old backup's decryption key is stored somewhere safe if you may need it.
+</Warning>
+
+## Key backup events
+
+The `MatrixClient` emits events related to key backup status:
+
+| Event | Payload | Description |
+|---|---|---|
+| `CryptoEvent.KeyBackupStatus` | `boolean` | Fires when key backup is enabled or disabled. |
+| `CryptoEvent.KeyBackupFailed` | `string` (error code) | Fires when a key backup upload fails. |
+| `CryptoEvent.KeyBackupSessionsRemaining` | `number` | Fires when the count of sessions awaiting backup changes. |
+| `CryptoEvent.KeyBackupDecryptionKeyCached` | `string` (version) | Fires when a new valid backup decryption key is cached locally. Only fired by the Rust crypto backend. |
+
+```javascript
+import { CryptoEvent } from "matrix-js-sdk/lib/crypto-api";
+
+matrixClient.on(CryptoEvent.KeyBackupStatus, (enabled) => {
+    console.log("Key backup enabled:", enabled);
+});
+
+matrixClient.on(CryptoEvent.KeyBackupFailed, (errorCode) => {
+    console.error("Key backup failed with error:", errorCode);
+});
+
+matrixClient.on(CryptoEvent.KeyBackupSessionsRemaining, (remaining) => {
+    console.log(`${remaining} sessions remaining to back up`);
+});
+
+matrixClient.on(CryptoEvent.KeyBackupDecryptionKeyCached, (version) => {
+    console.log(`Decryption key cached for backup version ${version}`);
+});
+```
+
+## Restoring keys from backup
+
+### KeyBackupRestoreOpts and KeyBackupRestoreResult
+
+```typescript
+export interface KeyBackupRestoreOpts {
+    /**
+     * Called periodically to report the progress of the restore operation.
+     */
+    progressCallback?: (progress: ImportRoomKeyProgressData) => void;
+}
+
+export interface KeyBackupRestoreResult {
+    /** The total number of keys found in the backup. */
+    total: number;
+    /** The number of keys that were successfully imported. */
+    imported: number;
+}
+```
+
+### Restoring the full backup
+
+Before calling `restoreKeyBackup()`, a decryption key must be available in the crypto store. This can be achieved in several ways:
+
+- The key was cached by `resetKeyBackup()` when the backup was created.
+- The key was loaded from secret storage via `loadSessionBackupPrivateKeyFromSecretStorage()`.
+- The key was received from another device via interactive verification.
+- The key was set explicitly via `storeSessionBackupPrivateKey()`.
+
+```javascript
+// Load the key from secret storage (requires getSecretStorageKey callback to return the key)
+await crypto.loadSessionBackupPrivateKeyFromSecretStorage();
+
+// Restore the full backup
+const result = await crypto.restoreKeyBackup({
+    progressCallback: (progress) => {
+        if (progress.stage === "load_keys") {
+            console.log(
+                `Restored ${progress.successes} / ${progress.total} keys` +
+                ` (${progress.failures} failures)`
+            );
+        } else {
+            console.log("Fetching keys from server...");
+        }
+    },
+});
+
+console.log(`Restore complete: ${result.imported} / ${result.total} keys imported`);
+```
+
+<Warning>
+A full key backup restore can be very large and may take a significant amount of time. Use `progressCallback` to keep users informed and avoid timing out.
+</Warning>
+
+## Checking the active backup version
+
+To determine which backup version is currently active for automatic uploads:
+
+```javascript
+const version = await crypto.getActiveSessionBackupVersion();
+if (version !== null) {
+    console.log("Active backup version:", version);
+} else {
+    console.log("Automatic key backup is not enabled");
+}
+```
+
+## Determining backup trust
+
+To check whether a specific backup is trusted without enabling it:
+
+```javascript
+const backupInfo = await crypto.getKeyBackupInfo();
+if (backupInfo) {
+    const trustInfo = await crypto.isKeyBackupTrusted(backupInfo);
+    console.log("Backup trusted:", trustInfo.trusted);
+    console.log("Matches decryption key:", trustInfo.matchesDecryptionKey);
+}
+```
+
+## Complete key backup setup flow
+
+<Steps>
+  <Step title="Create the client with cryptoCallbacks">
+    ```javascript
+    import * as sdk from "matrix-js-sdk";
+    import { CryptoEvent } from "matrix-js-sdk/lib/crypto-api";
+
+    const matrixClient = sdk.createClient({
+        baseUrl: "http://localhost:8008",
+        accessToken: myAccessToken,
+        userId: myUserId,
+        cryptoCallbacks: {
+            getSecretStorageKey: async ({ keys }) => {
+                const key = await promptUserForRecoveryKey();
+                return [Object.keys(keys)[0], key];
+            },
+        },
+    });
+    ```
+  </Step>
+
+  <Step title="Initialize encryption and secret storage">
+    ```javascript
+    await matrixClient.initRustCrypto();
+    const crypto = matrixClient.getCrypto();
+
+    await crypto.bootstrapSecretStorage({
+        createSecretStorageKey: async () => {
+            const key = await crypto.createRecoveryKeyFromPassphrase();
+            await showRecoveryKeyToUser(key.encodedPrivateKey);
+            return key;
+        },
+    });
+    ```
+  </Step>
+
+  <Step title="Check for an existing backup and create one if needed">
+    ```javascript
+    const check = await crypto.checkKeyBackupAndEnable();
+
+    if (check === null) {
+        // No backup exists — create one.
+        // resetKeyBackup() also stores the key in secret storage.
+        await crypto.resetKeyBackup();
+        console.log("New key backup created");
+    } else {
+        console.log(
+            `Using existing backup version ${check.backupInfo.version},` +
+            ` trusted: ${check.trustInfo.trusted}`
+        );
+    }
+    ```
+  </Step>
+
+  <Step title="Listen for backup events">
+    ```javascript
+    matrixClient.on(CryptoEvent.KeyBackupStatus, (enabled) => {
+        updateBackupStatusUI(enabled);
+    });
+
+    matrixClient.on(CryptoEvent.KeyBackupFailed, (errorCode) => {
+        showBackupError(errorCode);
+    });
+    ```
+  </Step>
+
+  <Step title="Restore keys on a new device (optional)">
+    When signing into a new device that has no local key history:
+
+    ```javascript
+    // Load the decryption key from secret storage
+    await crypto.loadSessionBackupPrivateKeyFromSecretStorage();
+
+    // Restore all backed-up keys
+    const result = await crypto.restoreKeyBackup({
+        progressCallback: (progress) => {
+            if (progress.stage === "load_keys") {
+                updateProgressUI(progress.successes, progress.total);
+            }
+        },
+    });
+
+    console.log(`Restored ${result.imported} of ${result.total} keys`);
+    ```
+  </Step>
+</Steps>

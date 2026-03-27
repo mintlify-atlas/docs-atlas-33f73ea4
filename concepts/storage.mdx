@@ -1,0 +1,259 @@
+---
+title: "Storage"
+description: "How matrix-js-sdk stores sync data: MemoryStore versus IndexedDBStore, and how to configure each."
+keywords: ["MemoryStore", "IndexedDBStore", "store", "cryptoStore", "persistence"]
+---
+
+The matrix-js-sdk separates concerns between two kinds of storage:
+
+- **Sync store** — rooms, timelines, account data, filters, and the current sync token. Configured via the `store` option in `createClient()`.
+- **Crypto store** — end-to-end encryption session data (Olm/Megolm sessions, device keys). Configured via `cryptoStore`, or managed automatically by `initRustCrypto()`.
+
+This page covers the sync store. See the [E2EE guide](/guides/encryption-overview) for crypto store details.
+
+## MemoryStore (default)
+
+`MemoryStore` keeps all data in JavaScript memory. It is created automatically when no `store` is supplied to `createClient()`.
+
+```typescript
+import { MemoryStore, createClient } from "matrix-js-sdk";
+
+const client = createClient({
+    baseUrl: "https://matrix.org",
+    accessToken: myAccessToken,
+    userId: myUserId,
+    store: new MemoryStore(),
+});
+```
+
+### What MemoryStore stores
+
+Internally, `MemoryStore` holds:
+
+```typescript
+export class MemoryStore implements IStore {
+    private rooms: Record<string, Room> = {};      // roomId → Room
+    private users: Record<string, User> = {};      // userId → User
+    private syncToken: string | null = null;
+    private filters: MapWithDefault<string, Map<string, Filter>>;
+    public accountData: Map<string, MatrixEvent>;  // type → event
+    private oobMembers: Map<string, IStateEventWithRoomId[]>;
+    private pendingEvents: { [roomId: string]: Partial<IEvent>[] };
+    // …
+}
+```
+
+### Optional localStorage integration
+
+`MemoryStore` accepts a `localStorage` option. When provided, filter IDs are persisted across page reloads (keyed with the prefix `mxjssdk_memory_filter_`), which avoids re-uploading the sync filter on every session:
+
+```typescript
+const store = new MemoryStore({
+    localStorage: window.localStorage,
+});
+```
+
+<Note>
+Passing `localStorage` to `MemoryStore` persists **filter IDs only** — not rooms, timelines, or the sync token. After a page reload the client performs a full sync from the server.
+</Note>
+
+### When to use MemoryStore
+
+<CardGroup cols={2}>
+  <Card title="Suitable for">
+    - Node.js scripts and bots
+    - Short-lived sessions (automated tasks)
+    - Server-side rendering where IndexedDB is unavailable
+    - Testing and development
+  </Card>
+  <Card title="Not suitable for">
+    - Browser apps where users expect fast startup after reload
+    - Clients that must survive page refreshes without a full re-sync
+    - Applications managing large numbers of rooms
+  </Card>
+</CardGroup>
+
+## IndexedDBStore
+
+`IndexedDBStore` extends `MemoryStore`. It holds all data in memory but periodically flushes the full sync response to an IndexedDB database (every 5 minutes by default). On startup, calling `store.startup()` loads the previously persisted state, so the first meaningful sync comes from disk rather than the server.
+
+```typescript
+import { IndexedDBStore, createClient } from "matrix-js-sdk";
+
+const store = new IndexedDBStore({
+    indexedDB: window.indexedDB,
+    localStorage: window.localStorage, // for filter IDs
+    dbName: "my-app-matrix-store",      // optional; defaults to a fixed name
+});
+
+// Must be called after createClient but before startClient
+await store.startup();
+
+const client = createClient({
+    baseUrl: "https://matrix.org",
+    accessToken: myAccessToken,
+    userId: myUserId,
+    store: store,
+});
+
+client.on(ClientEvent.Sync, (state) => {
+    if (state === "PREPARED") {
+        console.log("Started up, now with go faster stripes!");
+    }
+});
+
+client.startClient();
+```
+
+### Constructor options
+
+| Option | Type | Description |
+|---|---|---|
+| `indexedDB` | `IDBFactory` | The IndexedDB interface, e.g. `window.indexedDB` |
+| `localStorage` | `Storage` | Used to persist filter IDs (optional) |
+| `dbName` | `string` | Database name. Use the same name across sessions to reuse persisted data |
+| `workerFactory` | `() => Worker` | Optional factory to run IDB transactions in a Web Worker |
+
+<Tip>
+Using `workerFactory` moves IndexedDB I/O off the main thread, reducing jank during writes. The SDK ships a `RemoteIndexedDBStoreBackend` for this purpose.
+</Tip>
+
+### Store degradation and the `degraded` event
+
+If an IndexedDB operation fails on a non-critical path, the store falls back to purely in-memory operation and emits a `degraded` event:
+
+```typescript
+store.on("degraded", (err) => {
+    console.warn("IndexedDB store degraded, falling back to memory:", err);
+});
+
+store.on("closed", () => {
+    // The IDB database was closed unexpectedly (e.g. storage was removed)
+    console.error("IndexedDB closed unexpectedly");
+});
+```
+
+### When to use IndexedDBStore
+
+<CardGroup cols={2}>
+  <Card title="Suitable for">
+    - Browser-based Matrix clients
+    - Apps where users reload the page and expect fast startup
+    - Clients managing many rooms where a full re-sync is expensive
+  </Card>
+  <Card title="Not suitable for">
+    - Node.js (no browser `indexedDB`)
+    - Environments with very limited storage quotas
+    - Multiple `MatrixClient` instances sharing the same database (causes corruption)
+  </Card>
+</CardGroup>
+
+## Choosing a store
+
+<Tabs>
+  <Tab title="Browser app">
+    ```typescript
+    import { IndexedDBStore, createClient } from "matrix-js-sdk";
+
+    const store = new IndexedDBStore({
+        indexedDB: window.indexedDB,
+        localStorage: window.localStorage,
+        dbName: "my-matrix-app",
+    });
+    await store.startup();
+
+    const client = createClient({ baseUrl, accessToken, userId, store });
+    await client.startClient();
+    ```
+  </Tab>
+  <Tab title="Node.js / bot">
+    ```typescript
+    import { MemoryStore, createClient } from "matrix-js-sdk";
+
+    const client = createClient({
+        baseUrl,
+        accessToken,
+        userId,
+        store: new MemoryStore(), // or omit entirely — same effect
+    });
+    await client.startClient();
+    ```
+  </Tab>
+</Tabs>
+
+## Browser storage limits and behaviour
+
+The notes below are based on observed behaviour in Firefox and Chrome (see `docs/storage-notes.md` in the SDK repository).
+
+<AccordionGroup>
+  <Accordion title="Quota limits">
+    Browsers measure quota in terms of on-disk space (not raw data size), so compressible data may fit within quota even when the raw size appears to exceed it.
+
+    When quota is exhausted:
+    - **Chrome** — IndexedDB startup may fail with `AbortError`; near the limit, `QuotaExceededError` is raised.
+    - **Firefox** — First failure is `QuotaExceededError`; subsequent writes may raise misleading errors like `InvalidStateError`. The database can become effectively read-only until it is reopened.
+  </Accordion>
+  <Accordion title="Cache eviction">
+    Under storage pressure the browser may delete IndexedDB for an origin. `localStorage` is handled separately by browsers and is **not** evicted when IndexedDB is deleted.
+
+    This is why `MemoryStore` (with `localStorage`) and `IndexedDBStore` both persist filter IDs in `localStorage` — they survive eviction.
+  </Accordion>
+  <Accordion title="Persistent storage">
+    Use the Storage Standard `navigator.storage.persist()` API to request persistent storage that the browser will not evict automatically:
+
+    ```typescript
+    if (navigator.storage && navigator.storage.persist) {
+        const granted = await navigator.storage.persist();
+        console.log("Persistent storage granted:", granted);
+    }
+    ```
+
+    Chrome grants this automatically based on user engagement criteria. Firefox shows a permission prompt.
+  </Accordion>
+  <Accordion title="Storage estimation">
+    Use `navigator.storage.estimate()` to check remaining quota:
+
+    ```typescript
+    if (navigator.storage && navigator.storage.estimate) {
+        const { quota, usage } = await navigator.storage.estimate();
+        console.log(`Using ${usage} of ${quota} bytes`);
+    }
+    ```
+
+    Note: Firefox returns `0` for `usage` when the site has persistent storage.
+  </Accordion>
+</AccordionGroup>
+
+## Checking whether a database already exists
+
+`IndexedDBStore` exposes a static helper to check whether a named database exists before trying to open it:
+
+```typescript
+const exists = await IndexedDBStore.exists(window.indexedDB, "my-matrix-app");
+if (exists) {
+    console.log("Found existing store — startup will load from cache");
+}
+```
+
+## Crypto store versus sync store
+
+<Warning>
+Do not share a single `MatrixClient` crypto store across multiple `MatrixClient` instances pointing at the same device. The cryptography stack is not thread-safe; concurrent access causes data corruption and decryption failures.
+</Warning>
+
+The crypto store is separate from the sync store:
+
+| | Sync store | Crypto store |
+|---|---|---|
+| Configured via | `store` in `createClient()` | `cryptoStore` in `createClient()`, or auto-managed by `initRustCrypto()` |
+| Holds | Rooms, timelines, account data, sync token | Olm/Megolm sessions, device keys, cross-signing keys |
+| Default | `MemoryStore` | IndexedDB in browser, in-memory in Node.js |
+| Class | `MemoryStore` / `IndexedDBStore` | `CryptoStore` (legacy) / Rust crypto (current) |
+
+For new applications, call `initRustCrypto()` after creating the client. The Rust crypto backend manages its own IndexedDB store automatically:
+
+```typescript
+const client = createClient({ baseUrl, accessToken, userId, deviceId });
+await client.initRustCrypto();
+await client.startClient();
+```

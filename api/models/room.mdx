@@ -1,0 +1,264 @@
+---
+title: "Room"
+description: "The Room class represents a Matrix room and provides access to its timeline, members, threads, and state."
+---
+
+The `Room` class is the central model for a Matrix room. It holds the room's live timeline, member list, threads, tags, and current state. You obtain `Room` instances from the `MatrixClient`:
+
+```typescript
+const room = client.getRoom("!cURbafjkfsMDVwdRDQ:matrix.org");
+```
+
+## Constructor
+
+```typescript
+new Room(
+  roomId: string,
+  client: MatrixClient,
+  myUserId: string,
+  opts?: IOpts
+)
+```
+
+## Properties
+
+<ResponseField name="roomId" type="string" required>
+  The immutable ID of this room, e.g. `!cURbafjkfsMDVwdRDQ:matrix.org`.
+</ResponseField>
+
+<ResponseField name="name" type="string" required>
+  The human-readable display name for this room.
+</ResponseField>
+
+<ResponseField name="normalizedName" type="string" required>
+  The un-homoglyphed version of the room name, used for sorting and searching.
+</ResponseField>
+
+<ResponseField name="tags" type="Record<string, Record<string, any>>" required>
+  Dict of room tags; keys are the tag name and values are optional tag metadata.
+
+  ```typescript
+  // Example: { "m.favourite": { order: 0.5 } }
+  const isFavourite = "m.favourite" in room.tags;
+  ```
+</ResponseField>
+
+<ResponseField name="currentState" type="RoomState" required>
+  The state of the room at the time of the most recent event in the live timeline.
+
+  <Expandable title="Deprecated note">
+    This field is present for backwards compatibility. Prefer
+    `room.getLiveTimeline().getState(EventTimeline.FORWARDS)` for new code.
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="summary" type="RoomSummary | null" required>
+  The room summary, populated from `/sync` responses. Contains hero member info
+  and joined/invited member counts.
+</ResponseField>
+
+<ResponseField name="accountData" type="Map<string, MatrixEvent>" required>
+  Per-room account data events keyed by event type.
+</ResponseField>
+
+<ResponseField name="timeline" type="MatrixEvent[]" required>
+  The live event timeline for this room, oldest event at index 0.
+
+  <Expandable title="Deprecated note">
+    Prefer `room.getLiveTimeline().getEvents()` for new code.
+  </Expandable>
+</ResponseField>
+
+## Methods
+
+### `getMembers()`
+
+```typescript
+public getMembers(): RoomMember[]
+```
+
+Returns all currently loaded members from the current room state.
+
+### `getJoinedMembers()`
+
+```typescript
+public getJoinedMembers(): RoomMember[]
+```
+
+Returns a list of members whose membership state is `join`.
+
+### `getMember(userId)`
+
+```typescript
+public getMember(userId: string): RoomMember | null
+```
+
+Get a single member from the current room state by user ID. Returns `null` if the
+member is not found.
+
+### `getLiveTimeline()`
+
+```typescript
+public getLiveTimeline(): EventTimeline
+```
+
+Returns the live unfiltered `EventTimeline` for this room. Do not hold a long-lived
+reference to the returned object — it may be replaced by the SDK when a timeline gap
+is detected in `/sync`.
+
+### `getThread(eventId)`
+
+```typescript
+public getThread(eventId: string): Thread | null
+```
+
+Returns the `Thread` instance associated with the given thread-root event ID,
+or `null` if no such thread is currently known.
+
+### `getThreads()`
+
+```typescript
+public getThreads(): Thread[]
+```
+
+Returns an array of all `Thread` instances known to this room. This is **not** a
+complete list of every thread that exists on the server — only threads that have been
+loaded locally.
+
+### `findEventById(eventId)`
+
+```typescript
+public findEventById(eventId: string): MatrixEvent | undefined
+```
+
+Searches all loaded timeline sets in the room for an event with the given ID.
+Returns `undefined` if the event is not found in any loaded timeline.
+
+### `getMembersWithMembership(membership)`
+
+```typescript
+public getMembersWithMembership(membership: Membership): RoomMember[]
+```
+
+Returns all members with the given membership state. Use values from `KnownMembership`.
+
+### `getMyMembership()`
+
+```typescript
+public getMyMembership(): Membership
+```
+
+Returns the membership state of the local user in this room. Defaults to `leave` if
+not yet determined.
+
+### `getJoinedMemberCount()`
+
+```typescript
+public getJoinedMemberCount(): number
+```
+
+Returns the number of joined members. Result is cached by the underlying `RoomState`.
+
+## RoomEvent Enum
+
+Events emitted by `Room` instances. Listen via `room.on(RoomEvent.X, handler)` or
+`client.on(RoomEvent.X, handler)`.
+
+| Value | String | Description |
+|---|---|---|
+| `RoomEvent.MyMembership` | `"Room.myMembership"` | The local user's membership changed. |
+| `RoomEvent.Tags` | `"Room.tags"` | The room's tags were updated. |
+| `RoomEvent.AccountData` | `"Room.accountData"` | Per-room account data was updated. |
+| `RoomEvent.Receipt` | `"Room.receipt"` | A read receipt was received. |
+| `RoomEvent.Name` | `"Room.name"` | The room display name changed. |
+| `RoomEvent.Redaction` | `"Room.redaction"` | An event in the room was redacted. |
+| `RoomEvent.RedactionCancelled` | `"Room.redactionCancelled"` | A pending local redaction was cancelled. |
+| `RoomEvent.LocalEchoUpdated` | `"Room.localEchoUpdated"` | The status of a sent event changed. |
+| `RoomEvent.Timeline` | `"Room.timeline"` | A new event was added to the timeline. |
+| `RoomEvent.TimelineReset` | `"Room.timelineReset"` | The timeline was reset (e.g. after a gap). |
+| `RoomEvent.TimelineRefresh` | `"Room.TimelineRefresh"` | A filtered timeline set was refreshed. |
+| `RoomEvent.OldStateUpdated` | `"Room.OldStateUpdated"` | The room's historical state was updated. |
+| `RoomEvent.CurrentStateUpdated` | `"Room.CurrentStateUpdated"` | The room's current state was updated. |
+| `RoomEvent.UnreadNotifications` | `"Room.UnreadNotifications"` | Unread notification counts changed. |
+| `RoomEvent.Summary` | `"Room.Summary"` | A new room summary arrived from `/sync`. |
+
+## Thread Support
+
+Rooms can contain threads — sub-conversations anchored to a root event. Threads are
+represented by the `Thread` class and are keyed by the root event's ID.
+
+```typescript
+import { ThreadEvent } from "matrix-js-sdk";
+
+// Listen for new threads
+room.on(ThreadEvent.New, (thread, toStartOfTimeline) => {
+  console.log("New thread:", thread.id);
+});
+
+// Get a specific thread
+const thread = room.getThread(rootEventId);
+if (thread) {
+  const replies = thread.timeline;
+}
+
+// Get all known threads
+const threads = room.getThreads();
+```
+
+Check server-side thread support before relying on thread APIs:
+
+```typescript
+import { Thread, FeatureSupport } from "matrix-js-sdk";
+
+if (Thread.hasServerSideSupport === FeatureSupport.Stable) {
+  // Safe to use thread timeline pagination
+}
+```
+
+## Code Example
+
+```typescript
+import { MatrixClient, RoomEvent, KnownMembership } from "matrix-js-sdk";
+
+// Iterate over all rooms
+const rooms = client.getRooms();
+for (const room of rooms) {
+  console.log(`Room: ${room.name} (${room.roomId})`);
+
+  // Access joined members
+  const members = room.getJoinedMembers();
+  console.log(`  ${members.length} joined members`);
+
+  for (const member of members) {
+    console.log(`  - ${member.name} (${member.userId})`);
+  }
+
+  // Access tags
+  if ("m.favourite" in room.tags) {
+    console.log("  [Favourite]");
+  }
+
+  // Find a specific event
+  const event = room.findEventById("$someEventId:matrix.org");
+  if (event) {
+    console.log("  Found event type:", event.getType());
+  }
+}
+
+// React to room name changes
+client.on(RoomEvent.Name, (room) => {
+  console.log(`Room renamed to: ${room.name}`);
+});
+
+// React to timeline events
+client.on(RoomEvent.Timeline, (event, room, toStartOfTimeline) => {
+  if (!room || toStartOfTimeline) return;
+  console.log(`New event in ${room.name}: ${event.getType()}`);
+});
+
+// Check the local user's own membership
+const myRoom = client.getRoom("!example:matrix.org");
+if (myRoom?.getMyMembership() === KnownMembership.Join) {
+  console.log("I am joined to this room");
+}
+```

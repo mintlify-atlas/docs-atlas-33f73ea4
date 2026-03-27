@@ -1,0 +1,218 @@
+---
+title: 'End-to-end encryption'
+description: 'Overview of end-to-end encryption in matrix-js-sdk, including initialization, the Rust crypto stack, and migration from legacy crypto.'
+keywords: ['e2e', 'encryption', 'rust crypto', 'initRustCrypto', 'CryptoApi', 'matrix-js-sdk']
+---
+
+End-to-end encryption (E2EE) in `matrix-js-sdk` ensures that message contents are only readable by the intended recipients. The SDK's encryption support is built on the [WebAssembly bindings](https://github.com/matrix-org/matrix-rust-sdk-crypto-wasm) of the Rust [matrix-sdk-crypto](https://github.com/matrix-org/matrix-rust-sdk/tree/main/crates/matrix-sdk-crypto) library.
+
+## Rust crypto stack
+
+The current encryption backend is the **Rust crypto stack**: `matrix-sdk-crypto` compiled to WebAssembly. It supersedes the older JavaScript-based implementation and is the only supported backend for new integrations.
+
+The Rust stack provides:
+- Megolm-based room message encryption
+- Olm-based to-device messages
+- Cross-signing for device and user verification
+- Server-side key backup
+- Secret storage (4S) integration
+
+<Note>
+The `MatrixClient.crypto` property from the legacy stack is no longer available. Use `MatrixClient.getCrypto()` to obtain a `CryptoApi` instance.
+</Note>
+
+## Initializing encryption
+
+Call `initRustCrypto()` on the `MatrixClient` after creating it, before calling `startClient()`.
+
+<Steps>
+  <Step title="Create the client">
+    ```javascript
+    import * as sdk from "matrix-js-sdk";
+
+    const matrixClient = sdk.createClient({
+        baseUrl: "http://localhost:8008",
+        accessToken: myAccessToken,
+        userId: myUserId,
+    });
+    ```
+  </Step>
+
+  <Step title="Initialize Rust crypto">
+    ```javascript
+    // Enables E2EE support using the Rust crypto backend.
+    await matrixClient.initRustCrypto();
+    ```
+
+    By default, `initRustCrypto()` attempts to use IndexedDB (available in browsers) as the crypto store. When running in Node.js or another environment without IndexedDB, pass `useIndexedDB: false` to use an ephemeral in-memory store:
+
+    ```javascript
+    await matrixClient.initRustCrypto({ useIndexedDB: false });
+    ```
+
+    <Warning>
+    Without a persistent store, the crypto state is lost when the process exits. You will need to create a new device on the server (via `MatrixClient.loginRequest`) each time your application starts.
+    </Warning>
+  </Step>
+
+  <Step title="Obtain the CryptoApi interface">
+    After initialization, use `getCrypto()` to access the `CryptoApi`:
+
+    ```javascript
+    const crypto = matrixClient.getCrypto();
+    // crypto is the main entry point for all E2EE operations
+    ```
+  </Step>
+
+  <Step title="Start the client">
+    ```javascript
+    await matrixClient.startClient({ initialSyncLimit: 10 });
+    ```
+  </Step>
+</Steps>
+
+## Thread safety
+
+<Warning>
+The cryptography stack is **not thread-safe**. Having multiple `MatrixClient` instances connected to the same IndexedDB will cause data corruption and decryption failures. The application layer is responsible for ensuring that only one `MatrixClient` instance is active at a time.
+</Warning>
+
+## CryptoApi interface
+
+`getCrypto()` returns a `CryptoApi` object, which is the primary interface for encryption operations. Key methods include:
+
+<AccordionGroup>
+  <Accordion title="Encryption state">
+    - `isEncryptionEnabledInRoom(roomId)` — Returns `true` if the room is configured for encryption.
+    - `getVersion()` — Returns the current version string of the crypto module (e.g. `Rust SDK 0.x.x (...), Vodozemac 0.x.x`).
+    - `getOwnDeviceKeys()` — Returns the public Ed25519 and Curve25519 keys for the current device.
+  </Accordion>
+
+  <Accordion title="Trust and verification">
+    - `getUserVerificationStatus(userId)` — Returns a `UserVerificationStatus` for the given user.
+    - `getDeviceVerificationStatus(userId, deviceId)` — Returns a `DeviceVerificationStatus` or `null`.
+    - `bootstrapCrossSigning(opts)` — Sets up cross-signing keys. See [Cross-signing](/guides/cross-signing).
+  </Accordion>
+
+  <Accordion title="Secret storage">
+    - `bootstrapSecretStorage(opts)` — Sets up server-side secret storage. See [Secret storage](/guides/secret-storage).
+    - `isSecretStorageReady()` — Returns `true` if secret storage is fully configured.
+  </Accordion>
+
+  <Accordion title="Key backup">
+    - `checkKeyBackupAndEnable()` — Checks the server for a trusted backup and enables it.
+    - `resetKeyBackup()` — Creates a new key backup version. See [Key backup](/guides/key-backup).
+  </Accordion>
+</AccordionGroup>
+
+## CryptoEvent enum
+
+The `MatrixClient` emits crypto-related events defined in the `CryptoEvent` enum:
+
+| Event | Description |
+|---|---|
+| `CryptoEvent.UserTrustStatusChanged` | The trust status of a user has changed. Payload: `(userId, UserVerificationStatus)`. |
+| `CryptoEvent.KeyBackupStatus` | Key backup enabled/disabled. Payload: `boolean`. |
+| `CryptoEvent.KeyBackupFailed` | Key backup upload failed. Payload: error code string. |
+| `CryptoEvent.KeyBackupSessionsRemaining` | Number of sessions awaiting backup changed. Payload: `number`. |
+| `CryptoEvent.KeyBackupDecryptionKeyCached` | A new valid backup decryption key is in cache. Payload: backup version string. |
+| `CryptoEvent.VerificationRequestReceived` | An incoming verification request. Payload: `VerificationRequest`. |
+| `CryptoEvent.DevicesUpdated` | Stored devices for one or more users have been updated. Payload: `(userIds, initialFetch)`. |
+| `CryptoEvent.KeysChanged` | Cross-signing keys changed or enabled/disabled. |
+| `CryptoEvent.LegacyCryptoStoreMigrationProgress` | Migration progress from legacy crypto. Payload: `(progress, total)`. |
+
+## Complete setup example
+
+The following is a full initialization flow including secret storage and cross-signing:
+
+```javascript
+import * as sdk from "matrix-js-sdk";
+import { CryptoEvent } from "matrix-js-sdk/lib/crypto-api";
+
+const matrixClient = sdk.createClient({
+    baseUrl: "http://localhost:8008",
+    accessToken: myAccessToken,
+    userId: myUserId,
+    cryptoCallbacks: {
+        getSecretStorageKey: async ({ keys }) => {
+            // Prompt the user to enter their recovery key.
+            // Return [keyId, privateKeyBytes] or null.
+            const key = await promptUserForRecoveryKey();
+            const keyId = Object.keys(keys)[0];
+            return [keyId, key];
+        },
+    },
+});
+
+// Initialize encryption
+await matrixClient.initRustCrypto();
+
+const crypto = matrixClient.getCrypto();
+
+// Set up secret storage (idempotent — safe to call unconditionally)
+await crypto.bootstrapSecretStorage({
+    createSecretStorageKey: async () => {
+        // Called only when a new key needs to be created.
+        // Prompt the user to save this key safely.
+        return generateAndDisplayRecoveryKey();
+    },
+});
+
+// Set up cross-signing
+await crypto.bootstrapCrossSigning({
+    authUploadDeviceSigningKeys: async (makeRequest) => {
+        return makeRequest(authDict);
+    },
+});
+
+// Enable key backup
+const hasKeyBackup = (await crypto.checkKeyBackupAndEnable()) !== null;
+if (!hasKeyBackup) {
+    await crypto.resetKeyBackup();
+}
+
+// Listen for crypto events
+matrixClient.on(CryptoEvent.UserTrustStatusChanged, (userId, status) => {
+    console.log(`Trust status changed for ${userId}:`, status.isVerified());
+});
+
+matrixClient.on(CryptoEvent.KeyBackupStatus, (enabled) => {
+    console.log("Key backup enabled:", enabled);
+});
+
+await matrixClient.startClient({ initialSyncLimit: 10 });
+```
+
+## Migrating from legacy crypto
+
+If your application previously called `MatrixClient.initLegacyCrypto()`, migration to the Rust stack happens automatically when you switch to `initRustCrypto()`. You must supply the legacy `cryptoStore` and `pickleKey` to `createClient` so the migration can read the existing data:
+
+```javascript
+const matrixClient = sdk.createClient({
+    // Provide the legacy crypto store and pickle key for migration.
+    cryptoStore: myCryptoStore,
+    pickleKey: myPickleKey,
+    baseUrl: "http://localhost:8008",
+    accessToken: myAccessToken,
+    userId: myUserId,
+});
+
+// Migration runs automatically when initRustCrypto is called.
+await matrixClient.initRustCrypto();
+```
+
+To track migration progress, listen for the `LegacyCryptoStoreMigrationProgress` event. When `progress === total === -1`, migration is complete:
+
+```javascript
+matrixClient.on(CryptoEvent.LegacyCryptoStoreMigrationProgress, (progress, total) => {
+    if (progress === -1 && total === -1) {
+        console.log("Migration complete");
+    } else {
+        console.log(`Migration progress: ${progress} / ${total}`);
+    }
+});
+```
+
+<Tip>
+After migrating, remove the `cryptoStore` and `pickleKey` options and any code that calls `initLegacyCrypto()`. The Rust stack does not support the deprecated `MatrixClient.crypto` property.
+</Tip>

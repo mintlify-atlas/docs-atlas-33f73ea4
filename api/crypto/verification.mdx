@@ -1,0 +1,391 @@
+---
+title: "Verification"
+description: "How to initiate, accept, and complete interactive key verification flows using VerificationRequest, SAS (emoji), and QR codes."
+---
+
+Interactive key verification lets two devices (or users) confirm each other's
+cryptographic identity by comparing short authentication strings (SAS / emojis) or
+scanning a QR code. The flow is modelled by the `VerificationRequest` interface.
+
+## How to Start Verification
+
+Obtain the `CryptoApi` instance first:
+
+```typescript
+const crypto = client.getCrypto();
+if (!crypto) throw new Error("Crypto not available");
+```
+
+### Verify another user via DM
+
+```typescript
+// requestVerificationDM(userId, roomId)
+const request = await crypto.requestVerificationDM(
+  "@bob:matrix.org",
+  "!dmRoomId:matrix.org"
+);
+```
+
+### Verify our own devices (self-verification)
+
+```typescript
+// Sends a to-device verification request to all of our own devices.
+const request = await crypto.requestOwnUserVerification();
+```
+
+### Verify a specific device directly
+
+```typescript
+const request = await crypto.requestDeviceVerification(
+  "@alice:matrix.org",
+  "DEVICEID"
+);
+```
+
+### Handle incoming requests
+
+Listen for `CryptoEvent.VerificationRequestReceived` on the `MatrixClient`:
+
+```typescript
+import { CryptoEvent } from "matrix-js-sdk";
+
+client.on(CryptoEvent.VerificationRequestReceived, (request) => {
+  console.log("Incoming verification from:", request.otherUserId);
+
+  // Check if we should auto-accept or prompt the user
+  if (request.isSelfVerification) {
+    handleSelfVerification(request);
+  } else {
+    promptUserToAccept(request);
+  }
+});
+```
+
+## VerificationRequest Interface
+
+A `VerificationRequest` represents one pending or in-progress verification flow and
+extends `TypedEventEmitter`. Its state is exposed through read-only getters.
+
+### Properties
+
+<ResponseField name="phase" type="VerificationPhase" required>
+  The current phase of the verification request. See `VerificationPhase` below.
+</ResponseField>
+
+<ResponseField name="transactionId" type="string | undefined">
+  A unique ID for this verification flow. Not assigned until the first message is
+  sent, so may be `undefined` in early phases.
+</ResponseField>
+
+<ResponseField name="roomId" type="string | undefined">
+  For in-room (DM) verifications, the ID of the room used. `undefined` for
+  to-device verifications.
+</ResponseField>
+
+<ResponseField name="otherUserId" type="string" required>
+  The user ID of the other party in this verification.
+</ResponseField>
+
+<ResponseField name="otherDeviceId" type="string | undefined">
+  For to-device verifications, the ID of the other device. `undefined` for in-room
+  verifications.
+</ResponseField>
+
+<ResponseField name="isSelfVerification" type="boolean" required>
+  `true` if the other party is one of the local user's own devices.
+</ResponseField>
+
+<ResponseField name="initiatedByMe" type="boolean" required>
+  `true` if the local device initiated this verification request.
+</ResponseField>
+
+<ResponseField name="pending" type="boolean" required>
+  `true` if the request is still in progress (phases `Requested`, `Ready`, or
+  `Started`).
+</ResponseField>
+
+<ResponseField name="accepting" type="boolean" required>
+  `true` if we have started sending an `m.key.verification.ready` but have not
+  yet received the remote echo.
+</ResponseField>
+
+<ResponseField name="declining" type="boolean" required>
+  `true` if we have started sending an `m.key.verification.cancel` but have not
+  yet received the remote echo.
+</ResponseField>
+
+<ResponseField name="timeout" type="number | null" required>
+  Milliseconds remaining before the request times out automatically. `null` means
+  no timeout applies.
+</ResponseField>
+
+<ResponseField name="methods" type="string[]" required>
+  The verification methods supported by both parties. Only populated after the
+  request reaches the `Ready` or `Started` phase.
+</ResponseField>
+
+<ResponseField name="chosenMethod" type="string | null" required>
+  The method selected in the `m.key.verification.start` event. `null` before the
+  `Started` phase.
+</ResponseField>
+
+<ResponseField name="verifier" type="Verifier | undefined">
+  The active `Verifier` object once the `Started` phase is reached.
+</ResponseField>
+
+<ResponseField name="cancellationCode" type="string | null" required>
+  If the request was cancelled, the cancellation code (e.g. `m.user`). Otherwise
+  `null`.
+</ResponseField>
+
+<ResponseField name="cancellingUserId" type="string | undefined">
+  The user ID that cancelled the request. Only defined in the `Cancelled` phase.
+</ResponseField>
+
+### Methods
+
+#### `accept()`
+
+```typescript
+accept(): Promise<void>
+```
+
+Accepts an incoming verification request by sending an
+`m.key.verification.ready` event. Transitions the phase from `Requested` to
+`Ready`.
+
+#### `cancel(params?)`
+
+```typescript
+cancel(params?: { reason?: string; code?: string }): Promise<void>
+```
+
+Cancels the request, sending an `m.key.verification.cancel` to the other party.
+The `params` argument is accepted for compatibility but is ignored by the Rust
+crypto backend.
+
+#### `startVerification(method)`
+
+```typescript
+startVerification(method: string): Promise<Verifier>
+```
+
+Sends an `m.key.verification.start` event for the given method (e.g. `"m.sas.v1"`).
+Returns a `Verifier` to drive the actual verification.
+
+#### `scanQRCode(qrCodeData)`
+
+```typescript
+scanQRCode(qrCodeData: Uint8ClampedArray): Promise<Verifier>
+```
+
+For QR-code verification: validates the scanned QR data and sends an
+`m.key.verification.start` with `method: m.reciprocate.v1`. Returns a `Verifier`;
+call `.verify()` on it to wait for the other party.
+
+#### `generateQRCode()`
+
+```typescript
+generateQRCode(): Promise<Uint8ClampedArray | undefined>
+```
+
+Generates the raw QR code data to display to the other party. Only returns data once
+the request is in `Ready` phase and the other party indicated support for scanning.
+
+#### `otherPartySupportsMethod(method)`
+
+```typescript
+otherPartySupportsMethod(method: string): boolean
+```
+
+Returns `true` if the other party advertised support for the given method. Useful
+for deciding which UI elements to show (e.g. whether to display a QR code).
+
+## VerificationPhase Enum
+
+The state machine of a `VerificationRequest`:
+
+| Value | Number | Description |
+|---|---|---|
+| `VerificationPhase.Unsent` | `1` | No event has been exchanged yet. |
+| `VerificationPhase.Requested` | `2` | An `m.key.verification.request` event was sent or received. |
+| `VerificationPhase.Ready` | `3` | An `m.key.verification.ready` event was sent or received; request is accepted. |
+| `VerificationPhase.Started` | `4` | An `m.key.verification.start` event was sent or received; method is chosen. |
+| `VerificationPhase.Cancelled` | `5` | An `m.key.verification.cancel` event was sent or received. |
+| `VerificationPhase.Done` | `6` | Verification is complete (`m.key.verification.done` exchanged). |
+
+## Verifier Interface
+
+A `Verifier` drives the actual cryptographic verification after the method is chosen.
+
+### Methods
+
+#### `verify()`
+
+```typescript
+verify(): Promise<void>
+```
+
+Starts and awaits the verification. Resolves when verification completes
+successfully; rejects if it is cancelled or times out.
+
+#### `cancel(e)`
+
+```typescript
+cancel(e: Error): void
+```
+
+Cancels the in-progress verification and emits `VerifierEvent.Cancel`.
+
+#### `getShowSasCallbacks()`
+
+```typescript
+getShowSasCallbacks(): ShowSasCallbacks | null
+```
+
+Returns the `ShowSasCallbacks` when an SAS comparison is ready to be shown to the
+user. Returns `null` at all other times.
+
+<Expandable title="ShowSasCallbacks shape">
+  ```typescript
+  interface ShowSasCallbacks {
+    sas: GeneratedSas; // the emoji/decimal SAS data
+    confirm(): Promise<void>; // user says SAS matches
+    mismatch(): void;         // user says SAS does not match
+    cancel(): void;           // user cancels
+  }
+
+  interface GeneratedSas {
+    decimal?: [number, number, number]; // three numbers 0–8191
+    emoji?: EmojiMapping[];             // seven [emoji, name] tuples
+  }
+
+  type EmojiMapping = [emoji: string, name: string];
+  ```
+</Expandable>
+
+#### `getReciprocateQrCodeCallbacks()`
+
+```typescript
+getReciprocateQrCodeCallbacks(): ShowQrCodeCallbacks | null
+```
+
+For QR code reciprocation: returns callbacks to confirm or cancel after the other
+party has scanned our QR code. Returns `null` at all other times.
+
+## VerifierEvent Enum
+
+| Value | String | Description |
+|---|---|---|
+| `VerifierEvent.Cancel` | `"cancel"` | Verification was cancelled. Payload: `Error \| MatrixEvent`. |
+| `VerifierEvent.ShowSas` | `"show_sas"` | SAS data is ready for display. Payload: `ShowSasCallbacks`. |
+| `VerifierEvent.ShowReciprocateQr` | `"show_reciprocate_qr"` | User should confirm the other side scanned the QR code. Payload: `ShowQrCodeCallbacks`. |
+
+## VerificationRequestEvent Enum
+
+| Value | String | Description |
+|---|---|---|
+| `VerificationRequestEvent.Change` | `"change"` | The state of the `VerificationRequest` changed. No payload. |
+
+## Complete Verification Flow Example
+
+The example below shows a complete SAS (emoji) verification from the initiator's side:
+
+```typescript
+import {
+  CryptoEvent,
+  VerificationPhase,
+  VerificationRequestEvent,
+  VerifierEvent,
+} from "matrix-js-sdk";
+
+async function verifySas(
+  client: MatrixClient,
+  targetUserId: string,
+  dmRoomId: string
+) {
+  const crypto = client.getCrypto();
+  if (!crypto) throw new Error("Crypto unavailable");
+
+  // 1. Send the verification request
+  const request = await crypto.requestVerificationDM(targetUserId, dmRoomId);
+  console.log("Verification requested. Phase:", request.phase);
+
+  // 2. Wait for the other side to accept (transition to Ready)
+  await new Promise<void>((resolve) => {
+    request.on(VerificationRequestEvent.Change, () => {
+      if (request.phase === VerificationPhase.Ready) resolve();
+      if (request.phase === VerificationPhase.Cancelled) {
+        throw new Error("Request cancelled by " + request.cancellingUserId);
+      }
+    });
+  });
+
+  // 3. Start SAS verification
+  const verifier = await request.startVerification("m.sas.v1");
+
+  // 4. Wait for SAS data to be ready
+  const sasCallbacks = await new Promise<ShowSasCallbacks>((resolve) => {
+    verifier.on(VerifierEvent.ShowSas, resolve);
+    verifier.verify().catch(console.error); // start the exchange
+  });
+
+  // 5. Display the emojis to the user
+  const emojis = sasCallbacks.sas.emoji ?? [];
+  console.log("Compare these emojis with the other device:");
+  for (const [emoji, name] of emojis) {
+    console.log(`  ${emoji} ${name}`);
+  }
+
+  // 6. User confirms or mismatches
+  const userConfirmed = await promptUser("Do the emojis match?");
+  if (userConfirmed) {
+    await sasCallbacks.confirm();
+  } else {
+    sasCallbacks.mismatch();
+    return;
+  }
+
+  // 7. Await completion
+  await new Promise<void>((resolve) => {
+    request.on(VerificationRequestEvent.Change, () => {
+      if (request.phase === VerificationPhase.Done) resolve();
+    });
+  });
+
+  console.log("Verification complete!");
+}
+
+// --- Receiving side ---
+
+client.on(CryptoEvent.VerificationRequestReceived, async (request) => {
+  console.log("Incoming verification from:", request.otherUserId);
+
+  // Accept the request
+  await request.accept();
+
+  // Wait for the initiator to choose a method
+  await new Promise<void>((resolve) => {
+    request.on(VerificationRequestEvent.Change, () => {
+      if (request.phase >= VerificationPhase.Started) resolve();
+    });
+  });
+
+  const verifier = request.verifier!;
+
+  verifier.on(VerifierEvent.ShowSas, async (sasCallbacks) => {
+    const emojis = sasCallbacks.sas.emoji ?? [];
+    console.log("Emojis:", emojis.map(([e]) => e).join(" "));
+
+    const ok = await promptUser("Do the emojis match?");
+    if (ok) {
+      await sasCallbacks.confirm();
+    } else {
+      sasCallbacks.mismatch();
+    }
+  });
+
+  await verifier.verify();
+  console.log("Verification complete!");
+});
+```

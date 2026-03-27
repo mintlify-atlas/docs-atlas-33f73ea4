@@ -1,0 +1,356 @@
+---
+title: "MatrixEvent"
+description: "The MatrixEvent class wraps a raw Matrix event object, providing typed accessors for common fields and handling encryption, redaction, and local echo lifecycle."
+---
+
+`MatrixEvent` is the core event model in matrix-js-sdk. Every event received from
+the homeserver — whether a room message, state event, or ephemeral event — is wrapped
+in a `MatrixEvent` instance.
+
+```typescript
+const events = room.getLiveTimeline().getEvents();
+for (const event of events) {
+  console.log(event.getType(), event.getSender(), event.getContent());
+}
+```
+
+## Constructor
+
+```typescript
+new MatrixEvent(event?: Partial<IEvent>)
+```
+
+The `event` parameter is the raw JSON event object from the homeserver. Applications
+should **not** access `matrixEvent.event` directly; use the getter methods instead.
+
+## Key Properties
+
+<ResponseField name="event" type="Partial<IEvent>" required>
+  The raw (possibly encrypted) event object as received from the homeserver. Avoid
+  direct access; use getters such as `getType()`, `getContent()`, and `getSender()`.
+
+  <Expandable title="IEvent shape">
+    ```typescript
+    interface IEvent {
+      event_id: string;
+      type: string;
+      content: IContent;
+      sender: string;
+      room_id?: string;
+      origin_server_ts: number;
+      txn_id?: string;
+      state_key?: string;
+      unsigned: IUnsigned;
+      redacts?: string;
+    }
+    ```
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="sender" type="RoomMember | null">
+  The `RoomMember` who sent this event, or `null` (e.g. for presence events, or if
+  the member is not yet loaded). Only reliably set for events appearing in a timeline.
+</ResponseField>
+
+<ResponseField name="target" type="RoomMember | null">
+  The `RoomMember` who is the *target* of this event — e.g. the invitee, the person
+  being banned. Only meaningful for `m.room.member` events.
+</ResponseField>
+
+<ResponseField name="status" type="EventStatus | null">
+  The sending status of a locally-created event. `null` once the remote echo has been
+  received. See the `EventStatus` enum below.
+</ResponseField>
+
+<ResponseField name="error" type="MatrixError | null">
+  The most recent error associated with sending this event, if any.
+</ResponseField>
+
+<ResponseField name="localTimestamp" type="number" required>
+  An approximate local timestamp (milliseconds since epoch) for when this event was
+  received by the device, adjusted for the server-reported `age` field.
+</ResponseField>
+
+<ResponseField name="forwardLooking" type="boolean" required>
+  When `true` (the default), `getDirectionalContent()` returns `event.content`.
+  When `false` (for backwards-looking state events), it returns `prev_content`.
+</ResponseField>
+
+## Methods
+
+### Identification
+
+#### `getId()`
+
+```typescript
+public getId(): string | undefined
+```
+
+Returns the event ID, e.g. `$143350589368169JsLZx:localhost`. May be `undefined` for
+unsent local echo events before they have been echoed back.
+
+#### `getType()`
+
+```typescript
+public getType(): EventType | string
+```
+
+Returns the **decrypted** event type (e.g. `m.room.message`). For encrypted events
+that have been successfully decrypted, this returns the cleartext type.
+
+#### `getSender()`
+
+```typescript
+public getSender(): string | undefined
+```
+
+Returns the sender's user ID string (e.g. `@alice:matrix.org`).
+
+#### `getRoomId()`
+
+```typescript
+public getRoomId(): string | undefined
+```
+
+Returns the room ID. Returns `undefined` for to-device events such as `m.presence`.
+
+#### `getStateKey()`
+
+```typescript
+public getStateKey(): string | undefined
+```
+
+Returns the `state_key` if this is a state event. Returns `undefined` for message
+events.
+
+#### `isState()`
+
+```typescript
+public isState(): boolean
+```
+
+Returns `true` if this is a state event.
+
+### Content
+
+#### `getContent<T>()`
+
+```typescript
+public getContent<T extends IContent = IContent>(): T
+```
+
+Returns the decrypted event content, or the content from the replacing event if this
+event has been edited. Returns an empty object if the event has been redacted.
+
+#### `getOriginalContent<T>()`
+
+```typescript
+public getOriginalContent<T = IContent>(): T
+```
+
+Returns the original decrypted content, ignoring any edit replacements.
+
+#### `getPrevContent()`
+
+```typescript
+public getPrevContent(): IContent
+```
+
+Returns the previous content for state events. Returns an empty object for
+non-state events or if no previous content is available.
+
+#### `getWireContent()`
+
+```typescript
+public getWireContent(): IContent
+```
+
+Returns the raw (possibly encrypted) content as it would be sent to the homeserver.
+
+### Timestamps
+
+#### `getTs()`
+
+```typescript
+public getTs(): number
+```
+
+Returns the `origin_server_ts` timestamp in milliseconds since epoch.
+
+#### `getDate()`
+
+```typescript
+public getDate(): Date | null
+```
+
+Returns the server timestamp as a `Date` object, or `null` if `origin_server_ts` is
+not set.
+
+### Encryption
+
+#### `isEncrypted()`
+
+```typescript
+public isEncrypted(): boolean
+```
+
+Returns `true` if the wire type of this event is `m.room.encrypted`.
+
+#### `isDecryptionFailure()`
+
+```typescript
+public isDecryptionFailure(): boolean
+```
+
+Returns `true` if this is an encrypted event that could not be decrypted. The SDK
+may retry decryption automatically when new key material arrives.
+
+#### `decryptionFailureReason`
+
+```typescript
+public get decryptionFailureReason(): DecryptionFailureCode | null
+```
+
+If decryption failed, the reason code from the `DecryptionFailureCode` enum.
+Otherwise `null`.
+
+#### `isBeingDecrypted()`
+
+```typescript
+public isBeingDecrypted(): boolean
+```
+
+Returns `true` if a decryption attempt is currently in progress.
+
+### Redaction
+
+#### `isRedacted()`
+
+```typescript
+public isRedacted(): boolean
+```
+
+Returns `true` if this event has been redacted (either a local or server-confirmed
+redaction).
+
+#### `makeRedacted(redactionEvent, room)`
+
+```typescript
+public makeRedacted(redactionEvent: MatrixEvent, room: Room): void
+```
+
+Applies the content stripping that would occur if the event had been redacted on the
+server before being received. Emits `MatrixEventEvent.BeforeRedaction` first.
+
+### Thread information
+
+#### `threadRootId`
+
+```typescript
+public get threadRootId(): string | undefined
+```
+
+The event ID of the thread root, if this event belongs to a thread.
+
+#### `isThreadRoot`
+
+```typescript
+public get isThreadRoot(): boolean
+```
+
+`true` if this event is the root event of a thread.
+
+## MatrixEventEvent Enum
+
+Events emitted by `MatrixEvent` instances:
+
+| Value | String | Description |
+|---|---|---|
+| `MatrixEventEvent.Decrypted` | `"Event.decrypted"` | Decryption succeeded or failed. Handler: `(event, err?)` |
+| `MatrixEventEvent.BeforeRedaction` | `"Event.beforeRedaction"` | Fires just before the event is redacted. Handler: `(event, redactionEvent)` |
+| `MatrixEventEvent.VisibilityChange` | `"Event.visibilityChange"` | Message visibility changed (MSC3531). Handler: `(event, visible)` |
+| `MatrixEventEvent.LocalEventIdReplaced` | `"Event.localEventIdReplaced"` | A local echo event ID was replaced with the real ID. |
+| `MatrixEventEvent.Status` | `"Event.status"` | The send status changed. Handler: `(event, status)` |
+| `MatrixEventEvent.Replaced` | `"Event.replaced"` | The event was replaced by an edit. |
+| `MatrixEventEvent.RelationsCreated` | `"Event.relationsCreated"` | A new relations collection was created. |
+| `MatrixEventEvent.SentinelUpdated` | `"Event.sentinelUpdated"` | The sentinel member for this event was updated. |
+
+## EventStatus Enum
+
+The send lifecycle of a locally-created event:
+
+| Value | String | Description |
+|---|---|---|
+| `EventStatus.ENCRYPTING` | `"encrypting"` | The event is being encrypted before sending. |
+| `EventStatus.QUEUED` | `"queued"` | The event is queued, waiting to be sent. |
+| `EventStatus.SENDING` | `"sending"` | The `/send` request is in flight. |
+| `EventStatus.SENT` | `"sent"` | The server acknowledged the event; waiting for remote echo. |
+| `EventStatus.NOT_SENT` | `"not_sent"` | The send failed and will not be retried automatically. |
+| `EventStatus.CANCELLED` | `"cancelled"` | The send was cancelled before it could complete. |
+
+Once the remote echo arrives and the event is fully confirmed, `status` is set to
+`null`.
+
+## Code Example
+
+```typescript
+import {
+  MatrixEvent,
+  MatrixEventEvent,
+  EventStatus,
+  EventType,
+  MsgType,
+  RoomEvent,
+} from "matrix-js-sdk";
+
+// Checking event type and reading content
+client.on(RoomEvent.Timeline, (event: MatrixEvent, room, toStartOfTimeline) => {
+  if (toStartOfTimeline) return; // ignore paginated history
+
+  const type = event.getType();
+
+  if (type === EventType.RoomMessage) {
+    const content = event.getContent();
+    if (content.msgtype === MsgType.Text) {
+      console.log(`[${event.getSender()}]: ${content.body}`);
+    }
+  }
+
+  if (type === EventType.RoomMember) {
+    console.log(
+      `Membership event for ${event.getStateKey()}:`,
+      event.getContent().membership
+    );
+  }
+});
+
+// Handling encrypted events
+client.on(MatrixEventEvent.Decrypted, (event: MatrixEvent, err?: Error) => {
+  if (err || event.isDecryptionFailure()) {
+    console.warn(
+      "Failed to decrypt:",
+      event.getId(),
+      event.decryptionFailureReason
+    );
+    return;
+  }
+  // Now safe to read cleartext content
+  console.log("Decrypted event type:", event.getType());
+});
+
+// Monitoring the send status of outgoing events
+const eventId = await client.sendTextMessage(roomId, "Hello world");
+const sentEvent = room.findEventById(eventId.event_id);
+if (sentEvent) {
+  sentEvent.on(MatrixEventEvent.Status, (event, status) => {
+    if (status === EventStatus.NOT_SENT) {
+      console.error("Message failed to send:", event.error);
+    }
+  });
+}
+
+// Detecting redacted events
+const timeline = room.getLiveTimeline().getEvents();
+const visible = timeline.filter((e) => !e.isRedacted());
+console.log(`${visible.length} non-redacted events`);
+```

@@ -1,0 +1,369 @@
+---
+title: "Events"
+description: "Event enums and the TypedEventEmitter pattern used throughout matrix-js-sdk."
+---
+
+## Overview
+
+`MatrixClient` and most model objects in matrix-js-sdk extend `TypedEventEmitter`, a strongly-typed subclass of Node.js `EventEmitter`. This means every event name is an enum value, and every listener function has a precise TypeScript type — making it impossible to mistype event names or pass the wrong callback signature.
+
+```typescript
+import { createClient, ClientEvent, RoomEvent } from "matrix-js-sdk";
+
+const client = createClient({ ... });
+
+// TypeScript enforces the correct listener signature
+client.on(ClientEvent.Sync, (state, prevState, data) => {
+  if (state === "PREPARED") {
+    console.log("Ready!");
+  }
+});
+```
+
+---
+
+## `TypedEventEmitter`
+
+`TypedEventEmitter<Events, Arguments>` extends Node.js `EventEmitter` with three generic type parameters:
+
+| Parameter | Description |
+|-----------|-------------|
+| `Events` | A string enum listing all events this emitter can fire. |
+| `Arguments` | A `ListenerMap` mapping each event to its listener signature. |
+| `SuperclassArguments` | Optional. Alternative mappings used when re-emitting events from sub-objects. |
+
+**Key methods** (all type-safe):
+
+```typescript
+client.on(event, listener)        // subscribe
+client.once(event, listener)      // subscribe for one invocation
+client.off(event, listener)       // unsubscribe
+client.addListener(event, listener)
+client.removeListener(event, listener)
+client.removeAllListeners(event?)
+client.emit(event, ...args)        // fire an event
+client.listenerCount(event)        // count listeners
+```
+
+**Source:** `src/models/typed-event-emitter.ts`
+
+### Strongly-typed listener example
+
+<Tabs>
+  <Tab title="TypeScript">
+    ```typescript
+    import {
+      createClient,
+      ClientEvent,
+      RoomEvent,
+      RoomMemberEvent,
+      SyncState,
+      type ISyncStateData,
+    } from "matrix-js-sdk";
+    import type { Room, MatrixEvent, RoomMember } from "matrix-js-sdk";
+
+    const client = createClient({
+      baseUrl: "https://matrix.org",
+      accessToken: "syt_...",
+      userId: "@alice:matrix.org",
+    });
+
+    // ClientEvent.Sync — TypeScript infers (state: SyncState, prevState: SyncState | null, data: ISyncStateData) => void
+    client.on(ClientEvent.Sync, (state: SyncState) => {
+      if (state === SyncState.Prepared) {
+        console.log("Initial sync complete.");
+      }
+    });
+
+    // RoomEvent.Timeline — TypeScript infers (event: MatrixEvent, room: Room | undefined, ...) => void
+    client.on(RoomEvent.Timeline, (event: MatrixEvent, room: Room | undefined) => {
+      console.log(`[${room?.name}] ${event.getSender()}: ${event.getContent().body}`);
+    });
+
+    // RoomMemberEvent.Membership — TypeScript infers (event: MatrixEvent, member: RoomMember, oldMembership?: string) => void
+    client.on(RoomMemberEvent.Membership, (event: MatrixEvent, member: RoomMember) => {
+      console.log(`${member.userId} is now ${member.membership}`);
+    });
+
+    await client.startClient();
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const { createClient, ClientEvent, RoomEvent, RoomMemberEvent, SyncState } = require("matrix-js-sdk");
+
+    const client = createClient({
+      baseUrl: "https://matrix.org",
+      accessToken: "syt_...",
+      userId: "@alice:matrix.org",
+    });
+
+    client.on(ClientEvent.Sync, (state) => {
+      if (state === SyncState.Prepared) {
+        console.log("Initial sync complete.");
+      }
+    });
+
+    client.on(RoomEvent.Timeline, (event, room) => {
+      console.log(`[${room?.name}] ${event.getSender()}: ${event.getContent().body}`);
+    });
+
+    await client.startClient();
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `ClientEvent`
+
+Events emitted directly by a `MatrixClient` instance.
+
+**Source:** `src/client.ts:906`
+
+| Enum value | String value | Description |
+|---|---|---|
+| `ClientEvent.Sync` | `"sync"` | Fires when the sync state changes. Payload: `(state: SyncState, prevState: SyncState \| null, data: ISyncStateData)`. |
+| `ClientEvent.Event` | `"event"` | Fires for every live event received via `/sync`. Not fired for paginated or searched events. Payload: `(event: MatrixEvent)`. |
+| `ClientEvent.ToDeviceEvent` | `"toDeviceEvent"` | **Deprecated.** Use `ClientEvent.ReceivedToDeviceMessage`. Fires for incoming to-device events. |
+| `ClientEvent.ReceivedToDeviceMessage` | `"receivedToDeviceMessage"` | Fires for new (potentially decrypted) to-device messages. Payload: `(message: ReceivedToDeviceMessage)`. |
+| `ClientEvent.AccountData` | `"accountData"` | Fires when user-scoped account data is updated. Payload: `(event: MatrixEvent, oldEvent: MatrixEvent \| undefined)`. |
+| `ClientEvent.Room` | `"Room"` | Fires when a new `Room` is added to the store (on invite or join). Payload: `(room: Room)`. |
+| `ClientEvent.DeleteRoom` | `"deleteRoom"` | Fires when a room is removed from the store (on forget). Payload: `(roomId: string)`. |
+| `ClientEvent.SyncUnexpectedError` | `"sync.unexpectedError"` | Fires when an unexpected error occurs during sync. |
+| `ClientEvent.ClientWellKnown` | `"WellKnown.client"` | Fires when the client's `.well-known` info is fetched. Payload: `(data: IClientWellKnown)`. |
+| `ClientEvent.ReceivedVoipEvent` | `"received_voip_event"` | Fires when a VoIP event is received. |
+| `ClientEvent.TurnServers` | `"turnServers"` | Fires when TURN server credentials are fetched or updated. |
+| `ClientEvent.TurnServersError` | `"turnServers.error"` | Fires when fetching TURN server credentials fails. |
+
+### `SyncState` enum
+
+The state values passed to `ClientEvent.Sync` listeners:
+
+| Value | String | Description |
+|---|---|---|
+| `SyncState.Prepared` | `"PREPARED"` | Initial sync is complete; the client is ready. |
+| `SyncState.Syncing` | `"SYNCING"` | The client is actively polling for new events. |
+| `SyncState.Catchup` | `"CATCHUP"` | Connectivity may have returned; attempting to catch up. |
+| `SyncState.Reconnecting` | `"RECONNECTING"` | A sync failed; retrying. Transitions to `Error` after the threshold. |
+| `SyncState.Error` | `"ERROR"` | Syncing has failed repeatedly or a hard error (e.g. expired token) occurred. |
+| `SyncState.Stopped` | `"STOPPED"` | The sync loop has been stopped via `stopClient()`. |
+
+**Source:** `src/sync.ts:80`
+
+```typescript
+client.on(ClientEvent.Sync, (state: SyncState, prevState: SyncState | null) => {
+  switch (state) {
+    case SyncState.Prepared:
+      console.log("Ready. Rooms:", client.getRooms().length);
+      break;
+    case SyncState.Error:
+      console.error("Sync error!");
+      break;
+    case SyncState.Stopped:
+      console.log("Client stopped.");
+      break;
+  }
+});
+```
+
+---
+
+## `RoomEvent`
+
+Events emitted by `Room` objects and bubbled up to `MatrixClient`.
+
+**Source:** `src/models/room.ts:145`
+
+| Enum value | String value | Description |
+|---|---|---|
+| `RoomEvent.MyMembership` | `"Room.myMembership"` | The logged-in user's membership in the room changed. Payload: `(room, membership, prevMembership)`. |
+| `RoomEvent.Tags` | `"Room.tags"` | Room tags were updated. Payload: `(event, room)`. |
+| `RoomEvent.AccountData` | `"Room.accountData"` | Room-scoped account data was updated. Payload: `(event, room, prevEvent?)`. |
+| `RoomEvent.Receipt` | `"Room.receipt"` | A read receipt was received. Payload: `(event, room)`. |
+| `RoomEvent.Name` | `"Room.name"` | The room name changed. Payload: `(room)`. |
+| `RoomEvent.Redaction` | `"Room.redaction"` | An event in the room was redacted. Payload: `(event, room)`. |
+| `RoomEvent.RedactionCancelled` | `"Room.redactionCancelled"` | A pending local redaction was cancelled. Payload: `(event, room)`. |
+| `RoomEvent.LocalEchoUpdated` | `"Room.localEchoUpdated"` | A locally pending event's status changed. Payload: `(event, room, oldEventId, oldStatus)`. |
+| `RoomEvent.Timeline` | `"Room.timeline"` | A new event was added to the room timeline. Payload: `(event, room, toStartOfTimeline, removed, data)`. |
+| `RoomEvent.TimelineReset` | `"Room.timelineReset"` | The room timeline was reset (e.g. after a limited sync). Payload: `(room, timelineSet, liveTimeline)`. |
+| `RoomEvent.TimelineRefresh` | `"Room.TimelineRefresh"` | The timeline was refreshed. Payload: `(room, eventTimelineSet)`. |
+| `RoomEvent.OldStateUpdated` | `"Room.OldStateUpdated"` | The historical state of the room was updated. |
+| `RoomEvent.CurrentStateUpdated` | `"Room.CurrentStateUpdated"` | The current state of the room was updated. |
+| `RoomEvent.HistoryImportedWithinTimeline` | `"Room.historyImportedWithinTimeline"` | Historical events were imported into the timeline. |
+| `RoomEvent.UnreadNotifications` | `"Room.UnreadNotifications"` | Unread notification counts changed. Payload: `(unreadNotifications, room, threadId)`. |
+| `RoomEvent.Summary` | `"Room.Summary"` | The room summary was updated. |
+
+```typescript
+client.on(RoomEvent.Timeline, (event, room, toStartOfTimeline) => {
+  if (toStartOfTimeline) return; // ignore paginated events
+  if (event.getType() !== "m.room.message") return;
+  console.log(room?.name, event.getSender(), event.getContent().body);
+});
+```
+
+---
+
+## `RoomMemberEvent`
+
+Events emitted by `RoomMember` objects.
+
+**Source:** `src/models/room-member.ts:27`
+
+| Enum value | String value | Description |
+|---|---|---|
+| `RoomMemberEvent.Membership` | `"RoomMember.membership"` | A room member's membership state changed. Payload: `(event, member, oldMembership)`. |
+| `RoomMemberEvent.Name` | `"RoomMember.name"` | A room member's display name changed. Payload: `(event, member, oldName)`. |
+| `RoomMemberEvent.PowerLevel` | `"RoomMember.powerLevel"` | A room member's power level changed. Payload: `(event, member)`. |
+| `RoomMemberEvent.Typing` | `"RoomMember.typing"` | A room member's typing status changed. Payload: `(event, member)`. |
+
+```typescript
+client.on(RoomMemberEvent.Membership, (event, member, oldMembership) => {
+  if (member.membership === "join" && oldMembership === "invite") {
+    console.log(`${member.name} accepted an invite to ${member.roomId}`);
+  }
+});
+```
+
+---
+
+## `RoomStateEvent`
+
+Events emitted by `RoomState` objects.
+
+**Source:** `src/models/room-state.ts:77`
+
+| Enum value | String value | Description |
+|---|---|---|
+| `RoomStateEvent.Events` | `"RoomState.events"` | A state event in the room state dictionary was updated. Payload: `(event, state, prevEvent)`. |
+| `RoomStateEvent.Members` | `"RoomState.members"` | A `RoomMember` in the members dictionary was updated. Payload: `(event, state, member)`. |
+| `RoomStateEvent.NewMember` | `"RoomState.newMember"` | A new `RoomMember` was added to the members dictionary. Payload: `(event, state, member)`. |
+| `RoomStateEvent.Update` | `"RoomState.update"` | Batched notification of state changes (without specificity). Payload: `(state)`. |
+| `RoomStateEvent.BeaconLiveness` | `"RoomState.BeaconLiveness"` | The liveness of beacons in the room changed. |
+| `RoomStateEvent.Marker` | `"RoomState.Marker"` | A marker event was found in the room state. Payload: `(markerEvent, setStateOptions)`. |
+
+```typescript
+client.on(RoomStateEvent.Events, (event, state, prevEvent) => {
+  if (event.getType() === "m.room.name") {
+    console.log("Room renamed to:", event.getContent().name);
+  }
+});
+```
+
+---
+
+## `UserEvent`
+
+Events emitted by `User` objects.
+
+**Source:** `src/models/user.ts:21`
+
+| Enum value | String value | Description |
+|---|---|---|
+| `UserEvent.DisplayName` | `"User.displayName"` | A user's display name changed. Payload: `(event, user)`. |
+| `UserEvent.AvatarUrl` | `"User.avatarUrl"` | A user's avatar URL changed. Payload: `(event, user)`. |
+| `UserEvent.Presence` | `"User.presence"` | A user's presence status changed. Payload: `(event, user)`. |
+| `UserEvent.CurrentlyActive` | `"User.currentlyActive"` | A user's `currentlyActive` flag changed. Payload: `(event, user)`. |
+| `UserEvent.LastPresenceTs` | `"User.lastPresenceTs"` | A user's last presence timestamp changed. Payload: `(event, user)`. |
+
+```typescript
+client.on(UserEvent.Presence, (event, user) => {
+  console.log(`${user.userId} is now ${user.presence}`);
+});
+```
+
+---
+
+## `MatrixEventEvent`
+
+Events emitted by individual `MatrixEvent` objects.
+
+**Source:** `src/models/event.ts:220`
+
+| Enum value | String value | Description |
+|---|---|---|
+| `MatrixEventEvent.Decrypted` | `"Event.decrypted"` | The event was decrypted (or decryption failed). Payload: `(event, err?)`. |
+| `MatrixEventEvent.BeforeRedaction` | `"Event.beforeRedaction"` | The event is about to be redacted. Payload: `(event, redactionEvent)`. |
+| `MatrixEventEvent.VisibilityChange` | `"Event.visibilityChange"` | The visibility of the event changed (MSC3531). Payload: `(event, visible)`. |
+| `MatrixEventEvent.LocalEventIdReplaced` | `"Event.localEventIdReplaced"` | A local event ID was replaced with the server-assigned ID. Payload: `(event)`. |
+| `MatrixEventEvent.Status` | `"Event.status"` | The send status of the event changed. Payload: `(event, status)`. |
+| `MatrixEventEvent.Replaced` | `"Event.replaced"` | The event was replaced by an edit. Payload: `(event)`. |
+| `MatrixEventEvent.RelationsCreated` | `"Event.relationsCreated"` | Relations for this event were created. Payload: `(relationType, eventType)`. |
+| `MatrixEventEvent.SentinelUpdated` | `"Event.sentinelUpdated"` | The sentinel member for this event was updated. Payload: `()`. |
+
+```typescript
+const event = room.findEventById("$someEventId");
+event?.on(MatrixEventEvent.Decrypted, (ev, err) => {
+  if (err) {
+    console.error("Decryption failed:", err);
+  } else {
+    console.log("Decrypted body:", ev.getContent().body);
+  }
+});
+```
+
+---
+
+## `CryptoEvent`
+
+Cryptography-related events emitted by `MatrixClient` when the crypto backend is initialised.
+
+**Source:** `src/crypto-api/CryptoEvent.ts:20`
+
+| Enum value | String value | Description |
+|---|---|---|
+| `CryptoEvent.UserTrustStatusChanged` | `"userTrustStatusChanged"` | The verification/trust status of a user changed. Payload: `(userId, userTrustLevel)`. |
+| `CryptoEvent.KeyBackupStatus` | `"crypto.keyBackupStatus"` | Key backup was enabled or disabled. Payload: `(enabled: boolean)`. |
+| `CryptoEvent.KeyBackupFailed` | `"crypto.keyBackupFailed"` | Key backup failed. Payload: `(errcode: string)`. |
+| `CryptoEvent.KeyBackupSessionsRemaining` | `"crypto.keyBackupSessionsRemaining"` | The count of sessions pending backup changed. Payload: `(remaining: number)`. |
+| `CryptoEvent.KeyBackupDecryptionKeyCached` | `"crypto.keyBackupDecryptionKeyCached"` | A new backup decryption key is cached. Payload: `(version: string)`. Rust crypto only. |
+| `CryptoEvent.VerificationRequestReceived` | `"crypto.verificationRequestReceived"` | A key verification request was received. Payload: `(request: VerificationRequest)`. |
+| `CryptoEvent.WillUpdateDevices` | `"crypto.willUpdateDevices"` | **Deprecated.** Use `CryptoEvent.DevicesUpdated` with Rust crypto. |
+| `CryptoEvent.DevicesUpdated` | `"crypto.devicesUpdated"` | Stored devices for a user were updated. Payload: `(userIds: string[], initialFetch: boolean)`. |
+| `CryptoEvent.KeysChanged` | `"crossSigning.keysChanged"` | The user's cross-signing keys changed. Experimental. |
+| `CryptoEvent.LegacyCryptoStoreMigrationProgress` | `"crypto.legacyCryptoStoreMigrationProgress"` | Migration from legacy to Rust crypto is in progress. Payload: `(progress: number, total: number)`. |
+| `CryptoEvent.DehydratedDeviceCreated` | `"dehydration.DehydratedDeviceCreated"` | A new dehydrated device was created locally. |
+| `CryptoEvent.DehydratedDeviceUploaded` | `"dehydration.DehydratedDeviceUploaded"` | A dehydrated device was successfully uploaded. |
+| `CryptoEvent.RehydrationStarted` | `"dehydration.RehydrationStarted"` | Rehydration of a dehydrated device has begun. |
+| `CryptoEvent.RehydrationProgress` | `"dehydration.RehydrationProgress"` | Rehydration progress update. Payload: `[roomKeyCount, toDeviceCount]`. |
+| `CryptoEvent.RehydrationCompleted` | `"dehydration.RehydrationCompleted"` | Rehydration completed successfully. |
+| `CryptoEvent.RehydrationError` | `"dehydration.RehydrationError"` | An error occurred during rehydration. Payload: `(errorMessage: string)`. |
+| `CryptoEvent.DehydrationKeyCached` | `"dehydration.DehydrationKeyCached"` | A dehydrated device key was cached locally. |
+| `CryptoEvent.DehydratedDeviceRotationError` | `"dehydration.DehydratedDeviceRotationError"` | An error occurred during periodic dehydrated device rotation. Payload: `(errorMessage: string)`. |
+
+```typescript
+import { CryptoEvent } from "matrix-js-sdk";
+
+client.on(CryptoEvent.VerificationRequestReceived, (request) => {
+  console.log("Verification request from", request.otherUserId);
+  // Show verification UI
+});
+
+client.on(CryptoEvent.KeyBackupStatus, (enabled) => {
+  console.log("Key backup:", enabled ? "enabled" : "disabled");
+});
+```
+
+---
+
+## Removing Listeners
+
+Always remove listeners you no longer need to avoid memory leaks, especially inside components that unmount.
+
+```typescript
+import { ClientEvent, type SyncState } from "matrix-js-sdk";
+
+function onSync(state: SyncState): void {
+  if (state === "PREPARED") {
+    // do something once
+    client.off(ClientEvent.Sync, onSync);
+  }
+}
+
+client.on(ClientEvent.Sync, onSync);
+
+// Or use once() for a single invocation:
+client.once(ClientEvent.Room, (room) => {
+  console.log("First room added:", room.roomId);
+});
+```

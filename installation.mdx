@@ -1,0 +1,207 @@
+---
+title: "Installation"
+description: "Install matrix-js-sdk and configure it for Node.js, browser, and TypeScript environments."
+keywords: ["matrix-js-sdk", "install", "npm", "yarn", "pnpm", "webpack", "vite", "typescript", "node.js", "browser"]
+---
+
+## Install the package
+
+<CodeGroup>
+
+```bash npm
+npm install matrix-js-sdk
+```
+
+```bash yarn
+yarn add matrix-js-sdk
+```
+
+```bash pnpm
+pnpm add matrix-js-sdk
+```
+
+</CodeGroup>
+
+<Tip>
+  The matrix-js-sdk project uses and recommends `pnpm`. See the [pnpm install guide](https://pnpm.io/installation#using-corepack) if you do not have it.
+</Tip>
+
+## Entry points
+
+The package exposes several entry points. Use the most specific entry point for your use case to keep bundles lean and types accurate.
+
+| Entry point | `package.json` field | Description |
+|---|---|---|
+| `matrix-js-sdk` | `main` / `browser` | Primary entry point. Exports the full client, models, event types, stores, and utilities. |
+| `matrix-js-sdk/lib/crypto-api` | — | The `CryptoApi` interface and all E2E encryption types. |
+| `matrix-js-sdk/lib/types` | — | Low-level types that mirror data structures defined in the Matrix specification. |
+| `matrix-js-sdk/lib/testing` | — | Test helpers. Do not import this in production code. |
+| `matrix-js-sdk/lib/utils/*.js` | — | Individual utility modules with standalone functions and types. |
+
+<Warning>
+  The SDK guards against loading multiple entrypoints simultaneously. Importing both `matrix-js-sdk` and `matrix-js-sdk/lib/browser-index.js` in the same bundle will throw: `"Multiple matrix-js-sdk entrypoints detected!"`
+</Warning>
+
+## Basic import patterns
+
+<Tabs>
+  <Tab title="Primary (ESM)">
+
+```typescript
+import * as sdk from "matrix-js-sdk";
+import { createClient, ClientEvent, RoomEvent } from "matrix-js-sdk";
+
+const client = createClient({
+    baseUrl: "https://matrix.org",
+    accessToken: "your_access_token",
+    userId: "@you:matrix.org",
+});
+```
+
+  </Tab>
+  <Tab title="Crypto API">
+
+```typescript
+import { createClient } from "matrix-js-sdk";
+import type { CryptoApi } from "matrix-js-sdk/lib/crypto-api";
+
+const client = createClient({ baseUrl: "https://matrix.org", /* ... */ });
+await client.initRustCrypto();
+
+const crypto: CryptoApi | undefined = client.getCrypto();
+```
+
+  </Tab>
+  <Tab title="Low-level types">
+
+```typescript
+import type { IEvent, IContent } from "matrix-js-sdk/lib/types";
+```
+
+  </Tab>
+  <Tab title="Testing utilities">
+
+```typescript
+// Only import in test files, never in production code
+import { mkRoom, mkEvent } from "matrix-js-sdk/lib/testing";
+```
+
+  </Tab>
+</Tabs>
+
+## Node.js
+
+The SDK requires **Node.js 22.0.0 or later** (the latest LTS release is recommended).
+
+```json package.json
+{
+    "engines": {
+        "node": ">=22.0.0"
+    }
+}
+```
+
+The package is an ES module (`"type": "module"` in its `package.json`), so you must use `import` syntax or dynamic `import()`. If your project uses CommonJS you will need a bundler or interop layer.
+
+```javascript app.js
+import sdk, { ClientEvent, RoomEvent } from "matrix-js-sdk";
+
+const matrixClient = sdk.createClient({
+    baseUrl: "http://localhost:8008",
+    accessToken: "your_access_token",
+    userId: "@example:localhost",
+});
+
+matrixClient.startClient({ initialSyncLimit: 20 });
+```
+
+<Note>
+  In Node.js, end-to-end encryption uses an in-memory crypto store by default. Without a persistent store you must create a new device on the server each time your application starts. Pass `{ useIndexedDB: false }` to `initRustCrypto()` when running outside a browser.
+</Note>
+
+## Browser
+
+The SDK is designed to run in browsers via a bundler. The `browser` field in `package.json` resolves to `./lib/browser-index.js`, which the bundler uses instead of `./lib/index.js`.
+
+The browser entry point automatically configures IndexedDB as the crypto store when the browser supports it:
+
+```typescript browser-index (excerpt)
+// if our browser (appears to) support indexeddb, use an indexeddb crypto store.
+if (indexedDB) {
+    matrixcs.setCryptoStoreFactory(
+        () => new matrixcs.IndexedDBCryptoStore(indexedDB!, "matrix-js-sdk:crypto")
+    );
+}
+```
+
+### Bundler setup
+
+<Tabs>
+  <Tab title="Vite">
+
+No special configuration is required for Vite. Install the package and import it directly:
+
+```typescript src/client.ts
+import { createClient } from "matrix-js-sdk";
+
+export const client = createClient({
+    baseUrl: "https://matrix.org",
+});
+```
+
+  </Tab>
+  <Tab title="Webpack">
+
+Webpack resolves the `browser` field automatically. If you see issues with Node.js built-ins, add the following to your config:
+
+```javascript webpack.config.js
+module.exports = {
+    resolve: {
+        fallback: {
+            // matrix-js-sdk uses no Node built-ins in the browser build,
+            // but some transitive deps may need these set to false.
+            fs: false,
+            path: false,
+        },
+    },
+};
+```
+
+  </Tab>
+</Tabs>
+
+<Info>
+  The SDK uses WebAssembly for its Rust-based crypto layer (`@matrix-org/matrix-sdk-crypto-wasm`). Ensure your bundler and server are configured to serve `.wasm` files with the `application/wasm` MIME type.
+</Info>
+
+## Deno
+
+Deno is not officially supported, but you can use the SDK via the npm compatibility layer:
+
+```typescript
+import * as sdk from "npm:matrix-js-sdk";
+
+const client = sdk.createClient({ baseUrl: "https://matrix.org" });
+```
+
+## TypeScript configuration
+
+The package ships type declarations at `./lib/index.d.ts` (the `typings` field in `package.json`). No additional `@types` package is needed.
+
+Recommended `tsconfig.json` settings when using `matrix-js-sdk`:
+
+```json tsconfig.json
+{
+    "compilerOptions": {
+        "target": "ES2020",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "strict": true,
+        "lib": ["ES2020", "DOM"]
+    }
+}
+```
+
+<Note>
+  The SDK is built with TypeScript 6 and targets modern ES module resolution. Using `"moduleResolution": "bundler"` or `"moduleResolution": "node16"` is recommended. The legacy `"node"` resolution mode may fail to resolve subpath exports such as `matrix-js-sdk/lib/crypto-api`.
+</Note>

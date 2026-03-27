@@ -1,0 +1,255 @@
+---
+title: OIDC authentication
+description: Authenticate with Matrix homeservers that delegate authentication to an OpenID Connect provider.
+---
+
+Some Matrix homeservers delegate authentication to an external OpenID Connect (OIDC) provider rather than handling credentials directly. The matrix-js-sdk provides first-class support for this via the Authorization Code flow with PKCE.
+
+<Note>
+OIDC support in the SDK is currently marked as **experimental**. APIs may change between minor releases.
+</Note>
+
+## How it works
+
+Instead of sending a password to the homeserver, the client:
+
+1. Discovers the OIDC issuer from the homeserver's `.well-known` metadata.
+2. Registers itself with the issuer (if dynamic registration is supported).
+3. Generates an authorization URL and redirects the user to the OIDC provider.
+4. Handles the redirect back, exchanges the authorization code for tokens.
+5. Creates a `MatrixClient` with the access token and an `OidcTokenRefresher` for automatic renewal.
+
+## Step 1 — Discover the OIDC configuration
+
+Fetch and validate the issuer's OpenID configuration using `discoverAndValidateOIDCIssuerWellKnown()`. The issuer URL comes from the homeserver's `/auth_issuer` endpoint (or its `.well-known/matrix/client` document).
+
+```typescript
+import { discoverAndValidateOIDCIssuerWellKnown } from "matrix-js-sdk/lib/oidc";
+
+// issuer is the value from GET /_matrix/client/unstable/org.matrix.msc2965/auth_issuer
+const oidcConfig = await discoverAndValidateOIDCIssuerWellKnown(issuer);
+
+// oidcConfig is an OidcClientConfig — validated metadata plus signing keys.
+console.log("Authorization endpoint:", oidcConfig.authorization_endpoint);
+console.log("Token endpoint:", oidcConfig.token_endpoint);
+```
+
+This fetches `https://<issuer>/.well-known/openid-configuration`, validates it against the Matrix OIDC requirements, and also retrieves the issuer's signing keys from the `jwks_uri`.
+
+<Warning>
+This function is deprecated in favour of `MatrixClient.getAuthMetadata()` for clients that already have a `MatrixClient` instance. Use `discoverAndValidateOIDCIssuerWellKnown()` when you need to validate the issuer before a client exists.
+</Warning>
+
+## Step 2 — Register the client dynamically
+
+If your app does not have a pre-registered `client_id`, use `registerOidcClient()` to perform Dynamic Client Registration (MSC2966):
+
+```typescript
+import { registerOidcClient, type OidcRegistrationClientMetadata } from "matrix-js-sdk/lib/oidc";
+
+const clientMetadata: OidcRegistrationClientMetadata = {
+  clientName: "My Matrix App",
+  clientUri: "https://my-app.example.com",
+  logoUri: "https://my-app.example.com/logo.png",
+  applicationType: "web",
+  redirectUris: ["https://my-app.example.com/oidc/callback"],
+  contacts: ["support@my-app.example.com"],
+  tosUri: "https://my-app.example.com/terms",
+  policyUri: "https://my-app.example.com/privacy",
+};
+
+const clientId = await registerOidcClient(oidcConfig, clientMetadata);
+// Store clientId persistently — re-register only if necessary.
+```
+
+`registerOidcClient()` will throw if:
+- The issuer does not expose a `registration_endpoint`.
+- The issuer does not support the `authorization_code` or `refresh_token` grant types.
+- The registration request fails or returns an invalid response.
+
+<Tip>
+Persist the returned `clientId` in your application's storage. Re-registration creates a new client entry on the issuer and should be avoided on every app load.
+</Tip>
+
+## Step 3 — Generate the authorization URL
+
+Build the URL to redirect the user to for login. Use `generateOidcAuthorizationUrl()`, which creates a PKCE-protected authorization request and stores the required state in `sessionStorage`:
+
+```typescript
+import { generateOidcAuthorizationUrl } from "matrix-js-sdk/lib/oidc";
+import { secureRandomString } from "matrix-js-sdk/lib/randomstring";
+
+const nonce = secureRandomString(8);
+
+const authorizationUrl = await generateOidcAuthorizationUrl({
+  metadata: oidcConfig,
+  clientId,
+  homeserverUrl: "https://matrix.org",
+  redirectUri: "https://my-app.example.com/oidc/callback",
+  nonce,
+  // Optionally set prompt to control the OP's UI:
+  // "login" forces re-authentication, "create" opens the registration flow.
+  prompt: "login",
+});
+
+// Redirect the user's browser to authorizationUrl
+window.location.href = authorizationUrl;
+```
+
+The generated URL includes:
+- `response_type=code` and `response_mode=query`
+- A PKCE `code_challenge` (S256 method)
+- An opaque `state` value that maps back to the stored session state
+- A `scope` covering `openid` plus the Matrix device API
+
+### Scope and device binding
+
+By default, `generateOidcAuthorizationUrl()` calls `generateScope()` internally, which produces a scope in the form:
+
+```
+openid urn:matrix:org.matrix.msc2967.client:api:* urn:matrix:org.matrix.msc2967.client:device:<deviceId>
+```
+
+If you want to bind the token to a specific device ID from the start, you can generate the scope manually:
+
+```typescript
+import { generateScope } from "matrix-js-sdk/lib/oidc";
+
+const scope = generateScope("MY_DEVICE_ID");
+```
+
+## Step 4 — Handle the callback and exchange the code
+
+After the user authenticates, the OIDC provider redirects to your `redirectUri` with `code` and `state` query parameters. Exchange these for tokens:
+
+```typescript
+import { completeAuthorizationCodeGrant } from "matrix-js-sdk/lib/oidc";
+
+// Parse `code` and `state` from the callback URL query string
+const params = new URLSearchParams(window.location.search);
+const code = params.get("code")!;
+const state = params.get("state")!;
+
+const {
+  oidcClientSettings,
+  tokenResponse,
+  homeserverUrl,
+  identityServerUrl,
+  idTokenClaims,
+} = await completeAuthorizationCodeGrant(code, state);
+
+// tokenResponse contains access_token, refresh_token, expires_at, etc.
+// oidcClientSettings.clientId and .issuer are needed for token refresh
+// idTokenClaims contains the user's identity claims
+```
+
+`completeAuthorizationCodeGrant()` reads the stored state from `sessionStorage`, validates the id token, and returns the full token response along with the homeserver URL that was embedded in the state at the start of the flow.
+
+## Step 5 — Create the client with token refresh
+
+Construct your `MatrixClient` using the tokens from step 4, and provide an `OidcTokenRefresher` instance so access tokens are renewed automatically:
+
+```typescript
+import { createClient } from "matrix-js-sdk";
+import { OidcTokenRefresher } from "matrix-js-sdk/lib/oidc";
+
+// Extend OidcTokenRefresher to persist tokens after each refresh
+class MyTokenRefresher extends OidcTokenRefresher {
+  protected async persistTokens(tokens: { accessToken: string; refreshToken?: string }): Promise<void> {
+    // Store tokens in your app's secure storage
+    localStorage.setItem("mx_access_token", tokens.accessToken);
+    if (tokens.refreshToken) {
+      localStorage.setItem("mx_refresh_token", tokens.refreshToken);
+    }
+  }
+}
+
+const tokenRefresher = new MyTokenRefresher(
+  oidcClientSettings.issuer,
+  oidcClientSettings.clientId,
+  "https://my-app.example.com/oidc/callback", // redirectUri
+  idTokenClaims.sub, // deviceId — use the subject claim or your device ID
+  idTokenClaims,
+);
+
+const client = createClient({
+  baseUrl: homeserverUrl,
+  accessToken: tokenResponse.access_token,
+  refreshToken: tokenResponse.refresh_token,
+  userId: idTokenClaims.sub,
+  tokenRefreshFunction: tokenRefresher.doRefreshAccessToken.bind(tokenRefresher),
+});
+```
+
+## Token refresh with OidcTokenRefresher
+
+`OidcTokenRefresher` handles the token renewal lifecycle:
+
+- Lazily initialises an `oidc-client-ts` `OidcClient` on the first refresh call.
+- Deduplicates concurrent refresh requests — if multiple requests arrive while a refresh is in flight, they all wait for the same underlying request.
+- Uses `window.sessionStorage` for OIDC state (browser environments only).
+- Upgrades OIDC `ErrorResponse` failures to `TokenRefreshLogoutError`, which signals to the HTTP layer that the session should be terminated.
+
+Override `persistTokens()` to write new tokens to storage after a successful refresh:
+
+```typescript
+class MyTokenRefresher extends OidcTokenRefresher {
+  protected async persistTokens(
+    tokens: { accessToken: string; refreshToken?: string }
+  ): Promise<void> {
+    await mySecureStorage.set("access_token", tokens.accessToken);
+    if (tokens.refreshToken) {
+      await mySecureStorage.set("refresh_token", tokens.refreshToken);
+    }
+  }
+}
+```
+
+### Manually triggering a refresh
+
+```typescript
+const newTokens = await tokenRefresher.doRefreshAccessToken(currentRefreshToken);
+console.log("New access token:", newTokens.accessToken);
+console.log("Expires at:", newTokens.expiry);
+```
+
+## Browser vs Node.js
+
+<CardGroup cols={2}>
+  <Card title="Browser" icon="globe">
+    `generateOidcAuthorizationUrl()` and `completeAuthorizationCodeGrant()` use `window.sessionStorage` to store PKCE state and rely on `window.location`. They require a secure context (`https://`) for PKCE code challenge generation.
+  </Card>
+  <Card title="Node.js" icon="server">
+    These browser-specific functions are not suitable for use in Node.js. For CLI or server-side OAuth flows, implement the authorization code exchange manually using `generateAuthorizationParams()` and `generateAuthorizationUrl()`, storing state in your own mechanism.
+  </Card>
+</CardGroup>
+
+## Error handling
+
+OIDC errors are surfaced as `Error` instances with a message matching one of the `OidcError` enum values:
+
+```typescript
+import { OidcError } from "matrix-js-sdk/lib/oidc";
+
+try {
+  const clientId = await registerOidcClient(oidcConfig, clientMetadata);
+} catch (err) {
+  if ((err as Error).message === OidcError.DynamicRegistrationNotSupported) {
+    // The issuer doesn't support dynamic registration.
+    // Use a pre-registered client_id instead.
+  } else if ((err as Error).message === OidcError.DynamicRegistrationFailed) {
+    console.error("Registration request failed");
+  }
+}
+
+try {
+  const result = await completeAuthorizationCodeGrant(code, state);
+} catch (err) {
+  if ((err as Error).message === OidcError.MissingOrInvalidStoredState) {
+    // The stored PKCE state could not be found — the user may have
+    // navigated to the callback URL directly, or sessionStorage was cleared.
+  } else if ((err as Error).message === OidcError.CodeExchangeFailed) {
+    console.error("Token exchange failed");
+  }
+}
+```

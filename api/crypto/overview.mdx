@@ -1,0 +1,385 @@
+---
+title: "CryptoApi"
+description: "The CryptoApi interface exposes all end-to-end encryption functionality: key backup, cross-signing, device verification, and secret storage setup."
+---
+
+`CryptoApi` is the public interface for end-to-end encryption in matrix-js-sdk. Obtain
+an instance via `client.getCrypto()`. Returns `undefined` if the client was not
+initialized with crypto support.
+
+```typescript
+const crypto = client.getCrypto();
+if (!crypto) throw new Error("Encryption is not available");
+```
+
+## Global Settings
+
+<ResponseField name="globalBlacklistUnverifiedDevices" type="boolean" required>
+  When `true`, the client will refuse to send encrypted messages to any unverified
+  device. This is the global default; individual rooms can override it.
+
+  ```typescript
+  // Prevent sending to unverified devices globally
+  crypto.globalBlacklistUnverifiedDevices = true;
+  ```
+</ResponseField>
+
+## Methods
+
+### Setup
+
+#### `bootstrapSecretStorage(opts)`
+
+```typescript
+bootstrapSecretStorage(opts: CreateSecretStorageOpts): Promise<void>
+```
+
+Bootstraps [secret storage](https://spec.matrix.org/v1.12/client-server-api/#storage).
+If secret storage is not yet configured, generates a new recovery key and stores it.
+Also stores cross-signing private keys and key backup keys in secret storage.
+
+#### `bootstrapCrossSigning(opts)`
+
+```typescript
+bootstrapCrossSigning(opts: BootstrapCrossSigningOpts): Promise<void>
+```
+
+Bootstraps cross-signing by creating keys if they are not found locally or in secret
+storage. Publishes the public keys to the server and, if secret storage is set up,
+stores the private keys there.
+
+#### `isSecretStorageReady()`
+
+```typescript
+isSecretStorageReady(): Promise<boolean>
+```
+
+Returns `true` if secret storage is set up and storing cross-signing keys (and the
+key backup key, if a backup is enabled).
+
+#### `isCrossSigningReady()`
+
+```typescript
+isCrossSigningReady(): Promise<boolean>
+```
+
+Returns `true` if cross-signing is enabled, trusted, and has private keys available
+either in local storage or in secret storage.
+
+### Key Backup
+
+#### `checkKeyBackupAndEnable()`
+
+```typescript
+checkKeyBackupAndEnable(): Promise<KeyBackupCheck | null>
+```
+
+Force a re-check of the server-side key backup. If a trusted backup exists, starts
+backing up to it. Returns `null` if there is no backup on the server.
+
+<Expandable title="KeyBackupCheck shape">
+  ```typescript
+  interface KeyBackupCheck {
+    backupInfo: KeyBackupInfo;   // server backup metadata
+    trustInfo: BackupTrustInfo; // whether the backup is trusted
+  }
+
+  interface BackupTrustInfo {
+    readonly trusted: boolean;            // valid signature from a trusted device
+    readonly matchesDecryptionKey: boolean; // matches the stored decryption key
+  }
+  ```
+</Expandable>
+
+#### `resetKeyBackup()`
+
+```typescript
+resetKeyBackup(): Promise<void>
+```
+
+Creates a new key backup version, replacing any existing backups. If secret storage
+is configured, saves the new decryption key there.
+
+#### `getActiveSessionBackupVersion()`
+
+```typescript
+getActiveSessionBackupVersion(): Promise<string | null>
+```
+
+Returns the version string of the currently active key backup, or `null` if automatic
+key backup is not enabled.
+
+#### `restoreKeyBackup(opts?)`
+
+```typescript
+restoreKeyBackup(opts?: KeyBackupRestoreOpts): Promise<KeyBackupRestoreResult>
+```
+
+Downloads and restores the full key backup from the homeserver. The decryption key
+and backup version must have been previously stored via `storeSessionBackupPrivateKey`
+or loaded via `loadSessionBackupPrivateKeyFromSecretStorage`.
+
+<Expandable title="KeyBackupRestoreResult shape">
+  ```typescript
+  interface KeyBackupRestoreResult {
+    total: number;    // total number of keys found in the backup
+    imported: number; // number of keys successfully imported
+  }
+  ```
+</Expandable>
+
+### Device & User Trust
+
+#### `getUserVerificationStatus(userId)`
+
+```typescript
+getUserVerificationStatus(userId: string): Promise<UserVerificationStatus>
+```
+
+Returns the verification status of the given user. This reflects whether their
+cross-signing identity is verified by the local device.
+
+#### `getDeviceVerificationStatus(userId, deviceId)`
+
+```typescript
+getDeviceVerificationStatus(
+  userId: string,
+  deviceId: string
+): Promise<DeviceVerificationStatus | null>
+```
+
+Returns `null` if the device is unknown or has not published encryption keys.
+Otherwise returns the device's verification status.
+
+#### `setDeviceVerified(userId, deviceId, verified?)`
+
+```typescript
+setDeviceVerified(
+  userId: string,
+  deviceId: string,
+  verified?: boolean
+): Promise<void>
+```
+
+Marks a device as locally verified (`verified` defaults to `true`). This has the same
+effect as receiving a cross-signing signature for the device.
+
+#### `getUserDeviceInfo(userIds, downloadUncached?)`
+
+```typescript
+getUserDeviceInfo(
+  userIds: string[],
+  downloadUncached?: boolean
+): Promise<DeviceMap>
+```
+
+Returns a `Map<userId, Map<deviceId, Device>>` of all known devices. Set
+`downloadUncached: true` to fetch devices for users whose device lists are not
+currently being tracked.
+
+### Cross-signing
+
+#### `getCrossSigningKeyId(type?)`
+
+```typescript
+getCrossSigningKeyId(type?: CrossSigningKey): Promise<string | null>
+```
+
+Returns the ID (public key fingerprint) of the specified cross-signing key
+(`CrossSigningKey.Master` by default), if both the private and public parts are
+available locally. Returns `null` otherwise.
+
+#### `crossSignDevice(deviceId)`
+
+```typescript
+crossSignDevice(deviceId: string): Promise<void>
+```
+
+Creates and publishes a cross-signing signature for one of our own devices, indicating
+it is trusted. Requires cross-signing to be set up.
+
+### Dehydration
+
+#### `isDehydrationSupported()`
+
+```typescript
+isDehydrationSupported(): Promise<boolean>
+```
+
+Returns `true` if MSC3814 device dehydration is supported by both the crypto backend
+and the server. Always call this before `startDehydration`.
+
+#### `startDehydration(opts?)`
+
+```typescript
+startDehydration(opts?: StartDehydrationOpts | boolean): Promise<void>
+```
+
+Starts device dehydration. Optionally rehydrates an existing dehydrated device
+first, then creates a new dehydrated device and schedules periodic rotation.
+
+<Expandable title="StartDehydrationOpts shape">
+  ```typescript
+  interface StartDehydrationOpts {
+    createNewKey?: boolean;   // force creation of a new dehydration key
+    onlyIfKeyCached?: boolean; // only start if key is already in local storage
+    rehydrate?: boolean;       // try to rehydrate before creating (default: true)
+  }
+  ```
+</Expandable>
+
+### Export / Import Room Keys
+
+#### `exportRoomKeys()`
+
+```typescript
+exportRoomKeys(): Promise<IMegolmSessionData[]>
+```
+
+Exports all locally stored room keys as an array of session data objects. The
+returned data should be encrypted before being shown to or stored by the user.
+
+#### `exportRoomKeysAsJson()`
+
+```typescript
+exportRoomKeysAsJson(): Promise<string>
+```
+
+Same as `exportRoomKeys()` but serialised to a JSON string.
+
+#### `importRoomKeys(keys, opts?)`
+
+```typescript
+importRoomKeys(
+  keys: IMegolmSessionData[],
+  opts?: ImportRoomKeysOpts
+): Promise<void>
+```
+
+Imports room keys previously exported with `exportRoomKeys()`.
+
+#### `importRoomKeysAsJson(keys, opts?)`
+
+```typescript
+importRoomKeysAsJson(
+  keys: string,
+  opts?: ImportRoomKeysOpts
+): Promise<void>
+```
+
+Imports room keys from a JSON string produced by `exportRoomKeysAsJson()`.
+
+### Encryption Info
+
+#### `isEncryptionEnabledInRoom(roomId)`
+
+```typescript
+isEncryptionEnabledInRoom(roomId: string): Promise<boolean>
+```
+
+Returns `true` if the room has been configured for encryption. The setting persists
+even if the encryption event is later removed from room state (downgrade protection).
+
+#### `getEncryptionInfoForEvent(event)`
+
+```typescript
+getEncryptionInfoForEvent(event: MatrixEvent): Promise<EventEncryptionInfo | null>
+```
+
+Returns encryption metadata for an event, or `null` if the event is not encrypted
+or has not been successfully decrypted.
+
+#### `getVersion()`
+
+```typescript
+getVersion(): string
+```
+
+Returns a human-readable version string for the active crypto backend, e.g.
+`"Rust SDK 0.7.0 (abc1234), Vodozemac 0.5.0"`.
+
+## CryptoEvent Enum
+
+Cryptography-related events emitted by `MatrixClient`. Listen via
+`client.on(CryptoEvent.X, handler)`:
+
+| Value | String | Description |
+|---|---|---|
+| `CryptoEvent.UserTrustStatusChanged` | `"userTrustStatusChanged"` | A user's trust status changed. Payload: `(userId, trustLevel)`. |
+| `CryptoEvent.KeyBackupStatus` | `"crypto.keyBackupStatus"` | Key backup was enabled or disabled. Payload: `boolean`. |
+| `CryptoEvent.KeyBackupFailed` | `"crypto.keyBackupFailed"` | A key backup operation failed. Payload: error code string. |
+| `CryptoEvent.KeyBackupSessionsRemaining` | `"crypto.keyBackupSessionsRemaining"` | Number of sessions awaiting backup changed. |
+| `CryptoEvent.KeyBackupDecryptionKeyCached` | `"crypto.keyBackupDecryptionKeyCached"` | A valid backup decryption key was cached. Payload: backup version. |
+| `CryptoEvent.VerificationRequestReceived` | `"crypto.verificationRequestReceived"` | An incoming verification request was received. Payload: `VerificationRequest`. |
+| `CryptoEvent.DevicesUpdated` | `"crypto.devicesUpdated"` | Stored device info for one or more users was updated. |
+| `CryptoEvent.KeysChanged` | `"crossSigning.keysChanged"` | Cross-signing keys changed or cross-signing was toggled. |
+| `CryptoEvent.LegacyCryptoStoreMigrationProgress` | `"crypto.legacyCryptoStoreMigrationProgress"` | Migration progress from legacy to Rust crypto. Payload: `(progress, total)`. |
+| `CryptoEvent.DehydratedDeviceCreated` | `"dehydration.DehydratedDeviceCreated"` | A new dehydrated device was created locally. |
+| `CryptoEvent.DehydratedDeviceUploaded` | `"dehydration.DehydratedDeviceUploaded"` | A dehydrated device was successfully uploaded to the server. |
+| `CryptoEvent.RehydrationStarted` | `"dehydration.RehydrationStarted"` | Rehydration of a dehydrated device has started. |
+| `CryptoEvent.RehydrationProgress` | `"dehydration.RehydrationProgress"` | Rehydration progress update. Payload: `[roomKeyCount, toDeviceCount]`. |
+| `CryptoEvent.RehydrationCompleted` | `"dehydration.RehydrationCompleted"` | Rehydration completed successfully. |
+| `CryptoEvent.RehydrationError` | `"dehydration.RehydrationError"` | An error occurred during rehydration. Payload: error string. |
+| `CryptoEvent.DehydrationKeyCached` | `"dehydration.DehydrationKeyCached"` | A dehydrated device key was cached in the local database. |
+| `CryptoEvent.DehydratedDeviceRotationError` | `"dehydration.DehydratedDeviceRotationError"` | An error occurred during periodic dehydrated device rotation. |
+
+## Complete Initialization Example
+
+This example shows the recommended sequence for setting up encryption on a new or
+existing session:
+
+```typescript
+import {
+  MatrixClient,
+  CryptoEvent,
+  createClient,
+} from "matrix-js-sdk";
+import { LocalStorageCryptoStore } from "matrix-js-sdk/lib/crypto/store/localStorage-crypto-store";
+
+async function initEncryption(client: MatrixClient) {
+  const crypto = client.getCrypto();
+  if (!crypto) throw new Error("Crypto not available");
+
+  // 1. Bootstrap secret storage (generates or loads the recovery key)
+  await crypto.bootstrapSecretStorage({
+    createSecretStorageKey: async () => {
+      // Generate and securely display the recovery key to the user.
+      return await crypto.createRecoveryKeyFromPassphrase();
+    },
+  });
+
+  // 2. Bootstrap cross-signing (creates keys if not already present)
+  await crypto.bootstrapCrossSigning({
+    authUploadDeviceSigningKeys: async (makeRequest) => {
+      // Provide UIA (User Interactive Auth) if required by the server.
+      await makeRequest({});
+    },
+  });
+
+  // 3. Enable key backup
+  const backupCheck = await crypto.checkKeyBackupAndEnable();
+  if (!backupCheck) {
+    // No backup exists yet — create one.
+    await crypto.resetKeyBackup();
+  }
+
+  // 4. Optionally start device dehydration (requires server support)
+  if (await crypto.isDehydrationSupported()) {
+    await crypto.startDehydration({ rehydrate: true });
+  }
+
+  // 5. Listen for backup status changes
+  client.on(CryptoEvent.KeyBackupStatus, (enabled: boolean) => {
+    console.log("Key backup enabled:", enabled);
+  });
+
+  // 6. Listen for incoming verification requests
+  client.on(CryptoEvent.VerificationRequestReceived, (request) => {
+    console.log("Incoming verification from:", request.otherUserId);
+    // See the Verification page for how to handle this.
+  });
+
+  console.log("Crypto version:", crypto.getVersion());
+  console.log("Active backup version:", await crypto.getActiveSessionBackupVersion());
+}
+```

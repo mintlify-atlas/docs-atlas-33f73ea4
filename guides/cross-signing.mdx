@@ -1,0 +1,300 @@
+---
+title: 'Cross-signing'
+description: 'Set up cross-signing for device and user verification in matrix-js-sdk, including trust levels and checking verification status.'
+keywords: ['cross-signing', 'device verification', 'bootstrapCrossSigning', 'UserVerificationStatus', 'DeviceVerificationStatus']
+---
+
+Cross-signing allows users to verify each other — and their own devices — using a set of cryptographic master, self-signing, and user-signing keys. Once a user has verified another user via cross-signing, all devices cross-signed by that user are transitively trusted.
+
+## How cross-signing works
+
+Each user has three cross-signing keys:
+
+| Key | Purpose |
+|---|---|
+| **Master key** | The user's root identity key. Used to sign the self-signing and user-signing keys. |
+| **Self-signing key** | Signed by the master key. Used to sign the user's own devices. |
+| **User-signing key** | Signed by the master key. Used to sign other users' master keys. |
+
+When you verify a user (via emoji or QR code), you sign their master key with your user-signing key. Devices that are signed by their owner's self-signing key are considered verified through cross-signing.
+
+These key types are available as the `CrossSigningKey` enum:
+
+```typescript
+export enum CrossSigningKey {
+    Master = "master",
+    SelfSigning = "self_signing",
+    UserSigning = "user_signing",
+}
+```
+
+## Setting up cross-signing
+
+Call `CryptoApi.bootstrapCrossSigning()` to create cross-signing keys and publish them to the homeserver. Like `bootstrapSecretStorage`, this is idempotent — safe to call unconditionally:
+
+```javascript
+await matrixClient.getCrypto().bootstrapCrossSigning({
+    authUploadDeviceSigningKeys: async (makeRequest) => {
+        // makeRequest is a function that calls the upload endpoint.
+        // You need to provide UIA (User Interactive Auth) credentials.
+        return makeRequest(authDict);
+    },
+});
+```
+
+### BootstrapCrossSigningOpts
+
+```typescript
+export interface BootstrapCrossSigningOpts {
+    /** Optional. Reset the cross-signing keys even if keys already exist. */
+    setupNewCrossSigning?: boolean;
+
+    /**
+     * An application callback to collect the authentication data for uploading
+     * the keys. If not given, the keys will not be uploaded to the server.
+     */
+    authUploadDeviceSigningKeys?: UIAuthCallback<void>;
+}
+```
+
+The `authUploadDeviceSigningKeys` callback is required to upload newly generated public cross-signing keys to the server. It receives a `makeRequest` function that performs the actual upload; you must supply an authentication dictionary (UIA credentials) to authorize it.
+
+<Note>
+If `bootstrapSecretStorage` has already been called, `bootstrapCrossSigning` will store the private cross-signing keys in secret storage automatically.
+</Note>
+
+## Checking cross-signing status
+
+Use `isCrossSigningReady()` to verify that cross-signing is fully configured and trusted on the current device:
+
+```javascript
+const ready = await crypto.isCrossSigningReady();
+// true if cross-signing keys are available and trusted
+```
+
+For a detailed breakdown, use `getCrossSigningStatus()`:
+
+```javascript
+const status = await crypto.getCrossSigningStatus();
+// {
+//   publicKeysOnDevice: boolean,
+//   privateKeysInSecretStorage: boolean,
+//   privateKeysCachedLocally: {
+//     masterKey: boolean,
+//     selfSigningKey: boolean,
+//     userSigningKey: boolean,
+//   }
+// }
+```
+
+## User verification status
+
+`CryptoApi.getUserVerificationStatus(userId)` returns a `UserVerificationStatus` instance:
+
+```typescript
+export class UserVerificationStatus {
+    /** True if this user is verified via cross signing */
+    public isCrossSigningVerified(): boolean;
+
+    /** True if this user is verified via any means */
+    public isVerified(): boolean;
+
+    /** True if we ever verified this user before */
+    public wasCrossSigningVerified(): boolean;
+
+    /**
+     * True if the identity has changed in a way that needs user approval.
+     * To resolve: conduct a new verification or call pinCurrentUserIdentity().
+     */
+    public readonly needsUserApproval: boolean;
+}
+```
+
+Example:
+
+```javascript
+const status = await crypto.getUserVerificationStatus("@alice:example.org");
+
+if (status.needsUserApproval) {
+    // Alice's identity has changed since we last verified her.
+    // Show a warning and let the user decide how to proceed.
+    await promptUserToReVerify("@alice:example.org");
+} else if (status.isVerified()) {
+    console.log("Alice is verified");
+} else if (status.wasCrossSigningVerified()) {
+    // Previously verified but not anymore. Show a warning.
+    console.warn("Alice was previously verified but is not anymore");
+}
+```
+
+### Handling identity changes
+
+If `needsUserApproval` is `true`, the user's identity has changed since it was first seen and the new identity has not been verified. You have two options:
+
+```javascript
+// Option 1: Conduct a new interactive verification
+const request = await crypto.requestVerificationDM(userId, roomId);
+
+// Option 2: Pin the new identity without re-verifying
+await crypto.pinCurrentUserIdentity(userId);
+```
+
+If a user was previously verified but is no longer verifiable (e.g., they lost their keys), call `withdrawVerificationRequirement`:
+
+```javascript
+await crypto.withdrawVerificationRequirement(userId);
+```
+
+## Device verification status
+
+`CryptoApi.getDeviceVerificationStatus(userId, deviceId)` returns a `DeviceVerificationStatus` or `null` (if the device is unknown or has not published encryption keys):
+
+```typescript
+export class DeviceVerificationStatus {
+    /** True if this device has been signed by its owner */
+    public readonly signedByOwner: boolean;
+
+    /** True if this device has been verified via cross signing */
+    public readonly crossSigningVerified: boolean;
+
+    /** True if the device has been marked as locally verified */
+    public readonly localVerified: boolean;
+
+    /**
+     * Returns true if the device is verified:
+     * - manually via setDeviceVerified(), OR
+     * - cross-signed AND setTrustCrossSignedDevices() is true
+     */
+    public isVerified(): boolean;
+}
+```
+
+Example:
+
+```javascript
+const deviceStatus = await crypto.getDeviceVerificationStatus(
+    "@alice:example.org",
+    "DEVICEID123",
+);
+
+if (deviceStatus === null) {
+    console.log("Device is unknown or does not support encryption");
+} else if (deviceStatus.isVerified()) {
+    console.log("Device is verified");
+} else if (deviceStatus.crossSigningVerified) {
+    console.log("Device is cross-signed but trust of cross-signed devices is disabled");
+} else {
+    console.log("Device is not verified");
+}
+```
+
+### Locally verifying a device
+
+If you have verified a device through an out-of-band mechanism, mark it as locally verified:
+
+```javascript
+await crypto.setDeviceVerified("@alice:example.org", "DEVICEID123", true);
+```
+
+To cross-sign one of your own devices (after confirming it is genuine):
+
+```javascript
+await crypto.crossSignDevice("MYOTHERDEVICEID");
+```
+
+## Handling unverified devices in rooms
+
+When encrypting a message, the SDK must decide which devices to share the session key with. The `DeviceIsolationMode` controls this behavior:
+
+<Tabs>
+  <Tab title="AllDevicesIsolationMode">
+    Keys are shared with all devices in the room. Unverified devices receive keys but the client UI should display warnings:
+
+    ```javascript
+    import { AllDevicesIsolationMode } from "matrix-js-sdk/lib/crypto-api";
+
+    crypto.setDeviceIsolationMode(new AllDevicesIsolationMode(false));
+    // Pass true to fail key sharing if a verified user has unverified devices
+    ```
+  </Tab>
+  <Tab title="OnlySignedDevicesIsolationMode">
+    Keys are only shared with cross-signed devices. Events from unsigned devices result in a decryption failure. This corresponds to the "Exclude insecure devices" mode in Element Web, as recommended by [MSC4153](https://github.com/matrix-org/matrix-spec-proposals/pull/4153):
+
+    ```javascript
+    import { OnlySignedDevicesIsolationMode } from "matrix-js-sdk/lib/crypto-api";
+
+    crypto.setDeviceIsolationMode(new OnlySignedDevicesIsolationMode());
+    ```
+  </Tab>
+</Tabs>
+
+### Unverified device warnings
+
+The SDK design (from `docs/warning-on-unverified-devices.md`) recommends warning users when they try to send a message to a room that contains unverified devices they have not been notified about. The suggested approach is:
+
+- Track whether the user has already been warned about each unverified device in a given room.
+- When `AllDevicesIsolationMode` is used with `errorOnVerifiedUserProblems: true`, key-sharing will fail with an error if a previously-verified user has unverified devices — giving the client a hook to surface the warning.
+- Use `getDeviceVerificationStatus` to identify which specific devices are unverified, for display in membership lists or room info UI.
+
+```javascript
+// Listen for changes to device trust state
+matrixClient.on(CryptoEvent.DevicesUpdated, async (userIds) => {
+    for (const userId of userIds) {
+        const devices = await crypto.getUserDeviceInfo([userId]);
+        for (const [deviceId] of devices.get(userId) ?? []) {
+            const status = await crypto.getDeviceVerificationStatus(userId, deviceId);
+            if (status && !status.isVerified()) {
+                warnAboutUnverifiedDevice(userId, deviceId);
+            }
+        }
+    }
+});
+```
+
+## Complete bootstrapCrossSigning example
+
+```javascript
+import * as sdk from "matrix-js-sdk";
+
+const matrixClient = sdk.createClient({
+    baseUrl: "http://localhost:8008",
+    accessToken: myAccessToken,
+    userId: myUserId,
+    cryptoCallbacks: {
+        getSecretStorageKey: async ({ keys }) => {
+            const key = await promptUserForRecoveryKey();
+            return [Object.keys(keys)[0], key];
+        },
+    },
+});
+
+await matrixClient.initRustCrypto();
+const crypto = matrixClient.getCrypto();
+
+// Set up secret storage first so cross-signing keys can be stored there
+await crypto.bootstrapSecretStorage({
+    createSecretStorageKey: async () => {
+        const key = await crypto.createRecoveryKeyFromPassphrase();
+        await showRecoveryKeyToUser(key.encodedPrivateKey);
+        return key;
+    },
+});
+
+// Set up cross-signing
+await crypto.bootstrapCrossSigning({
+    authUploadDeviceSigningKeys: async (makeRequest) => {
+        return makeRequest(authDict);
+    },
+});
+
+// Check the result
+const status = await crypto.getCrossSigningStatus();
+console.log("Cross-signing status:", status);
+
+// Listen for trust status changes
+matrixClient.on(CryptoEvent.UserTrustStatusChanged, (userId, trustLevel) => {
+    console.log(`User ${userId} trust changed:`, trustLevel.isVerified());
+});
+
+await matrixClient.startClient();
+```

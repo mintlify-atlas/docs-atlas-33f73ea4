@@ -1,0 +1,321 @@
+---
+title: Interactive authentication (UIA)
+description: Handle User-Interactive Authentication (UIA) for sensitive Matrix operations like password changes and device deletion.
+---
+
+Some Matrix API endpoints — such as changing a password, deleting a device, or deactivating an account — require the user to prove their identity even when they already hold a valid access token. This mechanism is called **User-Interactive Authentication (UIA)**.
+
+When a UIA-protected endpoint is called without authentication, the homeserver responds with HTTP 401 and a JSON body describing the available authentication flows. The `InteractiveAuth` class in the SDK automates negotiating these flows.
+
+## When UIA is triggered
+
+Common operations that require UIA include:
+
+- `POST /account/password` — changing the account password
+- `DELETE /devices/{deviceId}` — removing a specific device
+- `POST /delete_devices` — bulk device deletion
+- `POST /account/deactivate` — account deactivation
+- `POST /keys/device_signing/upload` — uploading cross-signing keys
+
+## Authentication flows and stages
+
+Each flow is a list of stages that must be completed in order. Common stage types are defined in the `AuthType` enum:
+
+| Stage type | Enum value | Description |
+|---|---|---|
+| `m.login.password` | `AuthType.Password` | Password verification |
+| `m.login.email.identity` | `AuthType.Email` | Email ownership verification |
+| `m.login.msisdn` | `AuthType.Msisdn` | Phone number verification |
+| `m.login.recaptcha` | `AuthType.Recaptcha` | reCAPTCHA challenge |
+| `m.login.sso` | `AuthType.Sso` | SSO-based verification |
+| `m.login.dummy` | `AuthType.Dummy` | No-op stage (no user input needed) |
+| `m.login.registration_token` | `AuthType.RegistrationToken` | Registration token |
+
+## The InteractiveAuth class
+
+`InteractiveAuth<T>` drives the UIA flow. Instantiate it with:
+
+- `matrixClient` — the current `MatrixClient` instance.
+- `doRequest` — a function that makes the actual API call, receiving the current auth dict.
+- `stateUpdated` — a callback fired when the current stage changes or an error is returned.
+- `requestEmailToken` — a callback to request an email verification token (needed for `m.login.email.identity` flows).
+- `inputs` — user-supplied credentials used to select and complete flows.
+- `supportedStages` — optional list of stage types your UI handles natively, used to avoid fallback pages.
+
+## Basic UIA flow
+
+The following example handles a password-change request that requires password confirmation:
+
+```typescript
+import {
+  InteractiveAuth,
+  AuthType,
+  type AuthDict,
+  type IInputs,
+  type IStageStatus,
+} from "matrix-js-sdk";
+
+// Step 1: Provide the user's current password as an input
+const inputs: IInputs = {
+  // Not directly used in this example, but IInputs.emailAddress
+  // can be provided to trigger an email verification flow
+};
+
+const auth = new InteractiveAuth({
+  matrixClient: client,
+  inputs,
+  supportedStages: [AuthType.Password],
+
+  // doRequest receives the current auth dict (or null on the first call)
+  // and must call the actual API endpoint.
+  doRequest: async (authData: AuthDict | null, background: boolean) => {
+    return client.setPassword(
+      authData as AuthDict,
+      newPassword,
+      false, // logoutDevices
+    );
+  },
+
+  // stateUpdated is called when a new stage begins or an error occurs
+  stateUpdated: (nextStage: AuthType | string, status: IStageStatus) => {
+    if (status.errcode) {
+      console.error(`Stage ${nextStage} failed:`, status.errcode, status.error);
+      return;
+    }
+
+    if (nextStage === AuthType.Password) {
+      // Prompt the user for their current password, then call submitAuthDict
+      const currentPassword = getUserPassword();
+      auth.submitAuthDict({
+        type: AuthType.Password,
+        identifier: {
+          type: "m.id.user",
+          user: client.getUserId()!,
+        },
+        password: currentPassword,
+        session: auth.getSessionId()!,
+      });
+    }
+  },
+
+  // requestEmailToken is required even if you don't expect email stages,
+  // as the flow selection is determined at runtime
+  requestEmailToken: async (email, secret, attempt, session) => {
+    return client.requestRegisterEmailToken(email, secret, attempt);
+  },
+
+  busyChanged: (busy: boolean) => {
+    setButtonDisabled(busy);
+  },
+});
+
+try {
+  await auth.attemptAuth();
+  console.log("Password changed successfully");
+} catch (err) {
+  console.error("UIA failed:", err);
+}
+```
+
+## Providing user inputs
+
+The `IInputs` interface determines which flows are attempted. Providing an `emailAddress` causes the SDK to prefer flows that include `m.login.email.identity`; providing `phoneCountry` and `phoneNumber` prefers `m.login.msisdn` flows.
+
+```typescript
+export interface IInputs {
+  // An email address — selects a flow using email verification
+  emailAddress?: string;
+  // ISO two-letter country code for phone number resolution
+  phoneCountry?: string;
+  // A phone number — selects a flow using phone number validation
+  phoneNumber?: string;
+  // A registration token
+  registrationToken?: string;
+}
+```
+
+Example with email verification:
+
+```typescript
+const auth = new InteractiveAuth({
+  matrixClient: client,
+  inputs: {
+    emailAddress: "alice@example.com",
+  },
+  supportedStages: [AuthType.Email],
+
+  doRequest: async (authData) => {
+    return client.deactivateAccount(authData as AuthDict);
+  },
+
+  stateUpdated: (nextStage, status) => {
+    if (nextStage === AuthType.Email) {
+      if (status.emailSid) {
+        // The verification email has been sent.
+        // Tell the user to check their inbox.
+        // Once the link is clicked, poll() will detect completion.
+        startPolling();
+      }
+      if (status.errcode) {
+        console.error("Email stage error:", status.error);
+      }
+    }
+  },
+
+  requestEmailToken: async (email, secret, attempt, session) => {
+    return client.requestRegisterEmailToken(email, secret, attempt);
+  },
+});
+
+await auth.attemptAuth();
+```
+
+### Polling for out-of-band completion
+
+For email and MSISDN stages, the user verifies their identity outside the app (by clicking a link or entering a code). Call `auth.poll()` periodically to check whether the stage has been completed:
+
+```typescript
+const pollInterval = setInterval(async () => {
+  await auth.poll();
+}, 5000);
+
+// Clear the interval once attemptAuth resolves/rejects
+```
+
+## Submitting an auth dict manually
+
+You can drive the flow manually using `submitAuthDict()` rather than doing it inside `stateUpdated`. This is useful when stage completion is triggered by a separate UI action:
+
+```typescript
+// For a password stage:
+await auth.submitAuthDict({
+  type: AuthType.Password,
+  identifier: {
+    type: "m.id.user",
+    user: client.getUserId()!,
+  },
+  password: currentPassword,
+  session: auth.getSessionId()!,
+});
+
+// For a registration token stage:
+await auth.submitAuthDict({
+  type: AuthType.RegistrationToken,
+  token: registrationToken,
+  session: auth.getSessionId()!,
+});
+```
+
+<Note>
+Always include the `session` field from `auth.getSessionId()` in your auth dict. The homeserver uses it to track which stages have been completed across multiple requests in the same UIA session.
+</Note>
+
+## Cross-signing key upload
+
+Uploading cross-signing keys via `authUploadDeviceSigningKeys` is a common UIA use case. The callback receives a `UIAuthCallback<T>` — a function that takes the auth dict and retries the request. You drive UIA by calling `makeRequest` inside the callback:
+
+```typescript
+import { type UIAuthCallback, type AuthDict } from "matrix-js-sdk";
+
+// authUploadDeviceSigningKeys is used inside initRustCrypto bootstrapping
+const crypto = client.getCrypto()!;
+
+await crypto.bootstrapCrossSigning({
+  authUploadDeviceSigningKeys: async (makeRequest: (authData: AuthDict | null) => Promise<void>) => {
+    // First, attempt with no auth to get the session and available flows
+    try {
+      await makeRequest(null);
+    } catch (err) {
+      // If UIA is required, construct an InteractiveAuth and drive it
+      const interactiveAuth = new InteractiveAuth({
+        matrixClient: client,
+        inputs: {},
+        supportedStages: [AuthType.Password],
+        doRequest: (authData) => makeRequest(authData),
+        stateUpdated: (stage, status) => {
+          if (stage === AuthType.Password && !status.errcode) {
+            const password = getUserCurrentPassword();
+            interactiveAuth.submitAuthDict({
+              type: AuthType.Password,
+              identifier: { type: "m.id.user", user: client.getUserId()! },
+              password,
+              session: interactiveAuth.getSessionId()!,
+            });
+          }
+        },
+        requestEmailToken: async (email, secret, attempt, session) => {
+          return client.requestRegisterEmailToken(email, secret, attempt);
+        },
+      });
+      await interactiveAuth.attemptAuth();
+    }
+  },
+});
+```
+
+## Resuming a UIA session
+
+If the user navigates away mid-flow or the page reloads, you can resume the session by passing `sessionId`, `clientSecret`, and (for email flows) `emailSid` to the `InteractiveAuth` constructor:
+
+```typescript
+const auth = new InteractiveAuth({
+  matrixClient: client,
+  inputs: {},
+  sessionId: storedSessionId,
+  clientSecret: storedClientSecret,
+  emailSid: storedEmailSid, // only needed if the email stage was already started
+  doRequest: async (authData) => { /* ... */ },
+  stateUpdated: (stage, status) => { /* ... */ },
+  requestEmailToken: async (email, secret, attempt, session) => { /* ... */ },
+});
+```
+
+## Error handling
+
+Errors during a UIA stage are delivered to the `stateUpdated` callback via the `IStageStatus` object:
+
+```typescript
+stateUpdated: (nextStage: AuthType | string, status: IStageStatus) => {
+  if (status.errcode) {
+    // status.errcode: e.g. "M_FORBIDDEN", "M_UNKNOWN"
+    // status.error: human-readable message
+    showErrorMessage(`Authentication failed: ${status.error}`);
+    return;
+  }
+  // stage-specific info:
+  if (nextStage === AuthType.Email && status.emailSid) {
+    // status.emailSid: the sid of the active email validation session
+    showMessage("Check your email and click the verification link.");
+  }
+}
+```
+
+If no suitable flow can be found for the provided `inputs` and `supportedStages`, `attemptAuth()` rejects with a `NoAuthFlowFoundError`:
+
+```typescript
+import { NoAuthFlowFoundError } from "matrix-js-sdk";
+
+try {
+  await auth.attemptAuth();
+} catch (err) {
+  if (err instanceof NoAuthFlowFoundError) {
+    console.error("Required stages:", err.required_stages);
+    console.error("Available flows:", err.flows);
+    // Prompt the user to try a different method or show a fallback
+  }
+}
+```
+
+## Fallback pages
+
+For auth stage types that your UI does not support natively, the SDK provides a fallback URL:
+
+```typescript
+const fallbackUrl = client.getFallbackAuthUrl(
+  AuthType.Recaptcha,      // loginType
+  auth.getSessionId()!,    // authSessionId
+);
+
+// Open fallbackUrl in an iframe or popup for the user to complete the stage,
+// then call auth.poll() to detect completion.
+```

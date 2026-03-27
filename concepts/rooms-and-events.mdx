@@ -1,0 +1,245 @@
+---
+title: "Rooms and events"
+description: "How the matrix-js-sdk models rooms, timelines, and the events that flow through them."
+keywords: ["Room", "MatrixEvent", "timeline", "RoomEvent", "sendEvent", "Thread"]
+---
+
+In Matrix, everything happens inside a room. A room is a persistent, shared conversation space identified by a `roomId`. It holds a timeline of `MatrixEvent` objects — messages, state changes, reactions, and more. The matrix-js-sdk gives you high-level models for both.
+
+## The Room model
+
+A `Room` object represents everything the SDK knows about a single Matrix room: its timeline, current and historical state, members, name, receipts, threads, and notification counts.
+
+### Accessing rooms
+
+After the client has synced at least once (`SyncState.Prepared`), rooms are available through the client:
+
+```typescript
+import { ClientEvent, SyncState } from "matrix-js-sdk";
+
+client.once(ClientEvent.Sync, (state) => {
+    if (state !== SyncState.Prepared) return;
+
+    // Get a single room by ID
+    const room = client.getRoom("!roomId:server");
+
+    // Get all rooms
+    const rooms = client.getRooms();
+    console.log(`Joined ${rooms.length} rooms`);
+});
+```
+
+### Key room properties
+
+```typescript
+const room = client.getRoom("!abc:matrix.org");
+if (!room) return;
+
+console.log(room.roomId);          // "!abc:matrix.org"
+console.log(room.name);            // Resolved display name
+console.log(room.getJoinedMemberCount()); // Number of joined members
+
+// Current state events (m.room.name, m.room.topic, m.room.member, …)
+const state = room.currentState;
+
+// The live timeline for this room
+const timeline = room.getLiveTimeline();
+const events = timeline.getEvents();
+```
+
+### Iterating the timeline
+
+The timeline is an ordered array of `MatrixEvent` objects. The following pattern from the README demonstrates printing messages from every room:
+
+```typescript
+import { RoomEvent } from "matrix-js-sdk";
+
+client.on(RoomEvent.Timeline, (event, room, toStartOfTimeline) => {
+    if (toStartOfTimeline) {
+        return; // ignore paginated historical events
+    }
+    if (event.getType() !== "m.room.message") {
+        return;
+    }
+    console.log(
+        "(%s) %s :: %s",
+        room?.name,
+        event.getSender(),
+        event.getContent().body,
+    );
+});
+```
+
+You can also iterate the stored timeline directly:
+
+```typescript
+Object.keys(client.store.rooms).forEach((roomId) => {
+    client.getRoom(roomId)?.timeline.forEach((t) => {
+        console.log(t.event);
+    });
+});
+```
+
+### RoomEvent enum
+
+Listen to `Room` objects (or re-emitted via `MatrixClient`) for these events:
+
+| Constant | Value | Fired when |
+|---|---|---|
+| `RoomEvent.Timeline` | `"Room.timeline"` | A new event is added to (or removed from) the timeline |
+| `RoomEvent.TimelineReset` | `"Room.timelineReset"` | The live timeline was reset due to a limited sync |
+| `RoomEvent.Name` | `"Room.name"` | The room's display name changed |
+| `RoomEvent.MyMembership` | `"Room.myMembership"` | The local user's membership changed |
+| `RoomEvent.Receipt` | `"Room.receipt"` | A read receipt was received |
+| `RoomEvent.Tags` | `"Room.tags"` | Room tags were updated |
+| `RoomEvent.AccountData` | `"Room.accountData"` | Room-scoped account data changed |
+| `RoomEvent.UnreadNotifications` | `"Room.UnreadNotifications"` | Unread notification counts changed |
+
+#### Automatic room joining on invite
+
+```typescript
+import { KnownMembership, RoomEvent } from "matrix-js-sdk";
+
+client.on(RoomEvent.MyMembership, (room, membership, prevMembership) => {
+    if (membership === KnownMembership.Invite) {
+        client.joinRoom(room.roomId).then(() => {
+            console.log("Auto-joined", room.roomId);
+        });
+    }
+});
+```
+
+## The MatrixEvent model
+
+Every item in a room timeline is a `MatrixEvent`. It wraps the raw event JSON from the server and exposes typed accessors.
+
+### The raw IEvent structure
+
+```typescript
+interface IEvent {
+    event_id: string;       // Unique event ID
+    type: string;           // Event type, e.g. "m.room.message"
+    content: IContent;      // Event payload
+    sender: string;         // Sender's user ID
+    room_id?: string;
+    origin_server_ts: number; // Server timestamp (ms since epoch)
+    state_key?: string;     // Present on state events
+    unsigned: IUnsigned;    // Server-provided metadata
+    redacts?: string;       // For m.room.redaction events
+}
+```
+
+### Common MatrixEvent methods
+
+```typescript
+const event: MatrixEvent = /* from timeline */;
+
+event.getId();           // event_id
+event.getType();         // "m.room.message", "m.room.member", etc.
+event.getContent();      // Parsed content object
+event.getSender();       // "@alice:matrix.org"
+event.getTs();           // origin_server_ts
+event.isEncrypted();     // true if the event was encrypted
+event.isState();         // true if the event has a state_key
+event.getStateKey();     // the state_key value
+event.getRelation();     // m.relates_to if present
+```
+
+### Common event types
+
+<CardGroup cols={2}>
+  <Card title="m.room.message">
+    A user message. The `content.msgtype` field distinguishes text (`m.text`), images (`m.image`), files (`m.file`), and more.
+  </Card>
+  <Card title="m.room.member">
+    Membership change for a user. `state_key` is the affected user ID. `content.membership` is `join`, `invite`, `leave`, or `ban`.
+  </Card>
+  <Card title="m.room.name">
+    State event that sets the room's display name. `content.name` holds the value.
+  </Card>
+  <Card title="m.room.topic">
+    State event for the room topic. `content.topic` holds the value.
+  </Card>
+</CardGroup>
+
+## Sending events
+
+### Send a raw event
+
+```typescript
+const content = {
+    body: "Hello, world!",
+    msgtype: "m.text",
+};
+
+client.sendEvent("!roomId:server", "m.room.message", content, "", (err, res) => {
+    if (err) console.error(err);
+    else console.log("Sent event ID:", res.event_id);
+});
+```
+
+### Convenience helpers
+
+<CodeGroup>
+
+```typescript sendTextMessage
+await client.sendTextMessage("!roomId:server", "Hello from matrix-js-sdk!");
+```
+
+```typescript sendMessage
+const content = {
+    body: "Look at this!",
+    msgtype: "m.text",
+};
+await client.sendMessage("!roomId:server", content);
+```
+
+</CodeGroup>
+
+<Warning>
+The SDK queues outbound events locally and applies "local echo" — the sent event appears in the timeline immediately with an `EventStatus` of `sending`. If the request fails, the status transitions to `not_sent`. Always supply a `MatrixScheduler` if you want automatic retry on network errors.
+</Warning>
+
+## Threads
+
+When `threadSupport: true` is passed to `startClient()`, the SDK groups events that share a thread relation into `Thread` objects.
+
+```typescript
+const room = client.getRoom("!roomId:server");
+
+// All threads in the room
+const threads = room?.getThreads();
+
+// A specific thread by its root event ID
+const thread = room?.getThread("$rootEventId");
+
+// Events in a thread timeline
+const threadEvents = thread?.timeline ?? [];
+```
+
+<Tip>
+The `RoomEvent.Timeline` event fires for both the main timeline and thread timelines. Check `event.threadRootId` or the `toStartOfTimeline` parameter to distinguish them.
+</Tip>
+
+## Room members
+
+Member state is managed through `RoomState`. You can access current members and listen for changes:
+
+```typescript
+import { RoomStateEvent } from "matrix-js-sdk";
+
+client.on(RoomStateEvent.Members, (event, state, member) => {
+    const room = client.getRoom(state.roomId);
+    if (!room) return;
+
+    const memberList = state.getMembers();
+    console.log(room.name);
+    for (const m of memberList) {
+        console.log(`(${m.membership}) ${m.name}`);
+    }
+});
+```
+
+<Note>
+When `lazyLoadMembers: true` is set in `startClient()`, member events are not fetched during initial sync. Call `room.loadMembersIfNeeded()` before accessing members to ensure they are populated.
+</Note>

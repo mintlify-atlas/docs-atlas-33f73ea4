@@ -1,97 +1,103 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: Matrix JavaScript SDK
+description: Build real-time messaging, end-to-end encryption, and VoIP calling into your JavaScript or TypeScript applications with the Matrix protocol.
 ---
 
-## Setting up
+The Matrix JavaScript SDK is a comprehensive TypeScript/JavaScript library for building Matrix protocol clients. It handles everything from real-time sync and room management to end-to-end encryption and VoIP calling — in both browser and Node.js environments.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get a working Matrix client up and running in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/installation">
+    Install the SDK and learn about entry points and package managers
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Core Concepts" icon="book" href="/concepts/client">
+    Understand the MatrixClient, rooms, events, and sync lifecycle
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/matrix-client">
+    Explore the full MatrixClient API with types and examples
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Getting started
 
-Everything you need to create world-class documentation.
+<Steps>
+  <Step title="Install the SDK">
+    Add `matrix-js-sdk` to your project using your preferred package manager.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+    ```bash
+    pnpm add matrix-js-sdk
+    ```
+  </Step>
+  <Step title="Create a client">
+    Use `createClient` to connect to a Matrix homeserver.
 
-## Need inspiration?
+    ```typescript
+    import { createClient } from "matrix-js-sdk";
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    const client = createClient({
+      baseUrl: "https://matrix.org",
+      accessToken: "YOUR_ACCESS_TOKEN",
+      userId: "@you:matrix.org",
+    });
+    ```
+  </Step>
+  <Step title="Start syncing">
+    Call `startClient` to begin receiving real-time events.
+
+    ```typescript
+    await client.startClient({ initialSyncLimit: 10 });
+    ```
+  </Step>
+  <Step title="Listen for messages">
+    Attach event listeners to respond to Matrix events in real time.
+
+    ```typescript
+    import { RoomEvent } from "matrix-js-sdk";
+
+    client.on(RoomEvent.Timeline, (event, room) => {
+      if (event.getType() === "m.room.message") {
+        console.log(`[${room.name}] ${event.getSender()}: ${event.getContent().body}`);
+      }
+    });
+    ```
+  </Step>
+</Steps>
+
+## What you can build
+
+<CardGroup cols={3}>
+  <Card title="Messaging apps" icon="message">
+    Build full-featured chat clients with rooms, threads, and reactions
+  </Card>
+  <Card title="Encrypted communication" icon="lock">
+    Add end-to-end encryption with cross-signing and key backup
+  </Card>
+  <Card title="VoIP and video" icon="video">
+    Enable 1:1 and group calls with WebRTC and MatrixRTC/LiveKit
+  </Card>
+  <Card title="Bot integrations" icon="robot">
+    Create automated bots that interact with Matrix rooms
+  </Card>
+  <Card title="Embedded widgets" icon="window">
+    Build Matrix-aware widgets with the widget client API
+  </Card>
+  <Card title="OIDC authentication" icon="key">
+    Integrate modern OAuth 2.0 / OIDC login flows
+  </Card>
+</CardGroup>
+
+## Key features
+
+- **Full Matrix Client-Server API** — complete coverage of the Matrix specification
+- **End-to-end encryption** — powered by the Rust WebAssembly crypto stack (`matrix-sdk-crypto`)
+- **Real-time sync** — traditional `/sync` and modern Sliding Sync (MSC4186) support
+- **VoIP calling** — 1:1 calls and group calling via MatrixRTC and LiveKit
+- **OIDC support** — modern authentication with `oidc-client-ts`
+- **Browser and Node.js** — runs in web browsers via bundlers and in Node.js 22+
+- **TypeScript-first** — full type safety with comprehensive type definitions
+
+<Info>
+  The minimum supported Matrix server version is **v1.1**. Node.js 22+ is required for server-side usage.
+</Info>

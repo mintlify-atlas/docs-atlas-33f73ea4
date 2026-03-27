@@ -1,0 +1,258 @@
+---
+title: Authentication
+description: Authenticate users with the matrix-js-sdk using password login, SSO, access tokens, and token refresh.
+---
+
+The matrix-js-sdk supports several authentication methods: password-based login, SSO and OIDC, direct access token usage, and token-based login. This guide walks through each method and common patterns for session management.
+
+## Server discovery
+
+Before logging in, use `AutoDiscovery.findClientConfig()` to resolve a homeserver URL from a user-supplied domain. This performs a `.well-known/matrix/client` lookup and validates the result.
+
+```typescript
+import { AutoDiscovery } from "matrix-js-sdk";
+
+const config = await AutoDiscovery.findClientConfig("matrix.org");
+const hsConfig = config["m.homeserver"];
+
+if (hsConfig.state === AutoDiscovery.SUCCESS) {
+  console.log("Homeserver URL:", hsConfig.base_url);
+} else if (hsConfig.state === AutoDiscovery.FAIL_ERROR) {
+  // Terminal failure — do not proceed
+  console.error("Discovery failed:", hsConfig.error);
+} else {
+  // FAIL_PROMPT or PROMPT — warn the user but may still proceed
+  console.warn("Discovery incomplete:", hsConfig.error);
+}
+```
+
+The `state` field is one of `AutoDiscovery.SUCCESS`, `AutoDiscovery.FAIL_PROMPT`, `AutoDiscovery.FAIL_ERROR`, or `AutoDiscovery.PROMPT`.
+
+## Checking available login flows
+
+Before prompting the user, check which login flows the homeserver advertises:
+
+```typescript
+import { createClient } from "matrix-js-sdk";
+
+const tempClient = createClient({ baseUrl: "https://matrix.org" });
+const { flows } = await tempClient.loginFlows();
+
+// flows is an array of LoginFlow objects, each with a `type` string:
+// "m.login.password", "m.login.sso", "m.login.token", etc.
+for (const flow of flows) {
+  console.log("Supported flow:", flow.type);
+}
+```
+
+## Password login
+
+The recommended approach is to call `loginRequest()` on a temporary unauthenticated client, then construct a new fully-configured `MatrixClient` using the returned credentials.
+
+```typescript
+import { createClient } from "matrix-js-sdk";
+
+const tempClient = createClient({ baseUrl: "https://matrix.org" });
+
+const response = await tempClient.loginRequest({
+  type: "m.login.password",
+  identifier: {
+    type: "m.id.user",
+    user: "@alice:matrix.org",
+  },
+  password: "correct horse battery staple",
+  initial_device_display_name: "My App",
+  // Opt in to refresh tokens:
+  refresh_token: true,
+});
+
+// Construct a new client with the returned credentials
+const client = createClient({
+  baseUrl: "https://matrix.org",
+  accessToken: response.access_token,
+  userId: response.user_id,
+  deviceId: response.device_id,
+  refreshToken: response.refresh_token,
+});
+```
+
+<Note>
+`loginWithPassword()` and `login()` are deprecated because they mutate the existing client instance with only some of the returned credentials, which can produce inconsistent state. Use `loginRequest()` instead and create a new `MatrixClient` from the full response.
+</Note>
+
+### Login with a phone number
+
+```typescript
+const response = await tempClient.loginRequest({
+  type: "m.login.password",
+  identifier: {
+    type: "m.id.phone",
+    country: "GB",
+    phone: "07700900000",
+  },
+  password: "correct horse battery staple",
+});
+```
+
+### Login with an email address
+
+```typescript
+const response = await tempClient.loginRequest({
+  type: "m.login.password",
+  identifier: {
+    type: "m.id.thirdparty",
+    medium: "email",
+    address: "alice@example.com",
+  },
+  password: "correct horse battery staple",
+});
+```
+
+## Using an existing access token
+
+If you have previously stored credentials (for example in local storage after a prior login), pass them directly to `createClient()`:
+
+```typescript
+import { createClient } from "matrix-js-sdk";
+
+const client = createClient({
+  baseUrl: "https://matrix.org",
+  accessToken: storedAccessToken,
+  userId: storedUserId,
+  deviceId: storedDeviceId,
+  // If you also stored a refresh token:
+  refreshToken: storedRefreshToken,
+  tokenRefreshFunction: async (refreshToken) => {
+    const response = await client.refreshToken(refreshToken);
+    return {
+      accessToken: response.access_token,
+      refreshToken: response.refresh_token,
+      expiry: new Date(Date.now() + response.expires_in_ms),
+    };
+  },
+});
+```
+
+The `tokenRefreshFunction` is invoked automatically by the HTTP layer whenever it detects an expired token and a `refreshToken` is present.
+
+## Token-based login
+
+Some flows (such as SSO) issue a short-lived `m.login.token`. Exchange it with `loginRequest()`:
+
+```typescript
+const response = await tempClient.loginRequest({
+  type: "m.login.token",
+  token: ssoLoginToken,
+});
+```
+
+## SSO login
+
+For traditional homeserver-proxied SSO (not native OIDC), build the redirect URL using `getSsoLoginUrl()` and direct the user's browser to it:
+
+```typescript
+const ssoUrl = tempClient.getSsoLoginUrl(
+  "https://my-app.example.com/callback", // redirectUrl
+  "sso",                                  // loginType ("sso" or "cas")
+  "google",                               // optional IdP id
+  SSOAction.LOGIN,                        // optional: LOGIN or REGISTER
+);
+
+// Redirect the user to ssoUrl.
+// After authentication, the homeserver redirects back to your callback
+// with a `loginToken` query parameter. Exchange it:
+const callbackToken = new URLSearchParams(window.location.search).get("loginToken");
+const response = await tempClient.loginRequest({
+  type: "m.login.token",
+  token: callbackToken!,
+});
+```
+
+For native OIDC flows, see [OIDC authentication](/guides/oidc).
+
+## Token refresh
+
+Homeservers may issue short-lived access tokens alongside a `refresh_token`. Pass a `tokenRefreshFunction` when constructing the client and the SDK will call it automatically:
+
+```typescript
+import { createClient, type TokenRefreshFunction } from "matrix-js-sdk";
+
+const tokenRefreshFunction: TokenRefreshFunction = async (refreshToken) => {
+  const res = await client.refreshToken(refreshToken);
+  // Persist the new tokens in your storage layer here
+  return {
+    accessToken: res.access_token,
+    refreshToken: res.refresh_token,
+    expiry: new Date(Date.now() + res.expires_in_ms),
+  };
+};
+
+const client = createClient({
+  baseUrl: "https://matrix.org",
+  accessToken,
+  refreshToken,
+  userId,
+  deviceId,
+  tokenRefreshFunction,
+});
+```
+
+For OIDC sessions, use `OidcTokenRefresher` instead — see [OIDC authentication](/guides/oidc).
+
+## Logout
+
+### Log out the current session
+
+```typescript
+// Stop the client first to avoid race conditions with in-flight requests
+await client.logout(true /* stopClient */);
+```
+
+Passing `true` stops the client and aborts pending requests before calling `POST /logout`. After logout, discard the `MatrixClient` instance and clear any stored credentials.
+
+### Deactivate an account
+
+Account deactivation requires User-Interactive Authentication (UIA). See [Interactive authentication (UIA)](/guides/interactive-auth) for details on constructing the `auth` dict.
+
+```typescript
+await client.deactivateAccount(
+  { type: "m.login.password", identifier: { type: "m.id.user", user: userId }, password, session },
+  true, // erase — request erasure of account data
+);
+```
+
+## Error handling
+
+Authentication failures throw a `MatrixError`. The `errcode` field identifies the specific error:
+
+```typescript
+import { MatrixError } from "matrix-js-sdk";
+
+try {
+  const response = await tempClient.loginRequest({
+    type: "m.login.password",
+    identifier: { type: "m.id.user", user: "@alice:matrix.org" },
+    password: "wrong-password",
+  });
+} catch (err) {
+  if (err instanceof MatrixError) {
+    switch (err.errcode) {
+      case "M_FORBIDDEN":
+        console.error("Invalid credentials");
+        break;
+      case "M_USER_DEACTIVATED":
+        console.error("Account has been deactivated");
+        break;
+      case "M_LIMIT_EXCEEDED":
+        console.error("Too many attempts. Retry after:", err.data.retry_after_ms, "ms");
+        break;
+      default:
+        console.error("Login failed:", err.message);
+    }
+  }
+}
+```
+
+<Warning>
+When the homeserver returns `M_UNKNOWN_TOKEN` during normal API usage, the SDK emits a `Session.logged_out` event. Subscribe to this event to handle forced logouts and prompt the user to re-authenticate.
+</Warning>

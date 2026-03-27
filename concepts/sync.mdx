@@ -1,0 +1,192 @@
+---
+title: "Sync"
+description: "How matrix-js-sdk manages the /sync loop, sync states, and the Sliding Sync alternative."
+keywords: ["sync", "SyncState", "startClient", "ClientEvent", "SlidingSync", "MSC4186"]
+---
+
+The Matrix Client-Server API is driven by a long-polling `/sync` endpoint. The SDK handles the sync loop automatically once you call `startClient()`. Your application observes the sync lifecycle by listening to `ClientEvent.Sync`.
+
+## How sync works
+
+When `startClient()` is called, the SDK:
+
+1. Establishes (or restores from store) a filter for the `/sync` request.
+2. Sends a `/sync` request with the last-known `since` token (or none, for a fresh session).
+3. Processes the response — updating rooms, state, account data, and timelines.
+4. Emits `ClientEvent.Sync` with the new `SyncState`.
+5. Immediately opens the next long-poll with `timeout=30000` (configurable via `pollTimeout`).
+
+If the network drops or the server returns an error, the client transitions through `RECONNECTING` and eventually `ERROR` before retrying.
+
+## `SyncState` enum
+
+Defined in `src/sync.ts`:
+
+```typescript
+export enum SyncState {
+    Error        = "ERROR",
+    Prepared     = "PREPARED",
+    Stopped      = "STOPPED",
+    Syncing      = "SYNCING",
+    Catchup      = "CATCHUP",
+    Reconnecting = "RECONNECTING",
+}
+```
+
+| State | Meaning |
+|---|---|
+| `PREPARED` | First sync completed; the client is ready. Always followed immediately by `SYNCING`. |
+| `SYNCING` | The sync loop is running normally; emitted after each successful poll. |
+| `RECONNECTING` | A sync request failed but the keepalive (`/versions`) succeeded; will retry. |
+| `ERROR` | More than `FAILED_SYNC_ERROR_THRESHOLD` (3) consecutive failures, or the token is invalid. |
+| `CATCHUP` | Connection may have recovered; attempting to catch up with missed events. |
+| `STOPPED` | `stopClient()` was called; the loop is no longer running. |
+
+### State transition diagram
+
+```
+                                     +---->STOPPED
+                                     |
+         +----->PREPARED -------> SYNCING <--+
+         |                       ^  |  ^    |
+         |      CATCHUP ---------+  |  |    |
+         |        ^                 V  |    |
+null ----+        |  +------- RECONNECTING   |
+         |        V  V                      |
+         +------->ERROR --------------------+
+```
+
+## Handling sync state changes
+
+Register the listener **before** calling `startClient()`:
+
+```typescript
+import { ClientEvent, SyncState } from "matrix-js-sdk";
+
+client.on(ClientEvent.Sync, (state, prevState, data) => {
+    switch (state) {
+        case SyncState.Prepared:
+            // Safe to call getRooms(), getUser(), etc.
+            console.log("Sync ready. Rooms:", client.getRooms().length);
+            break;
+
+        case SyncState.Syncing:
+            // Normal operation — a poll completed successfully.
+            break;
+
+        case SyncState.Reconnecting:
+            // Show a subtle "reconnecting" indicator.
+            console.warn("Sync connection interrupted, retrying…");
+            break;
+
+        case SyncState.Error:
+            // data.error has the underlying Error object.
+            console.error("Sync failed:", data?.error?.message);
+            break;
+
+        case SyncState.Stopped:
+            // stopClient() was called.
+            console.log("Sync stopped.");
+            break;
+    }
+});
+
+await client.startClient({ initialSyncLimit: 10 });
+```
+
+### `ISyncStateData`
+
+The `data` argument passed to the `ClientEvent.Sync` callback has this shape:
+
+```typescript
+interface ISyncStateData {
+    error?: Error;          // Set when state === ERROR
+    oldSyncToken?: string;  // The "since" token used for this request
+    nextSyncToken?: string; // The "next_batch" from the response
+    catchingUp?: boolean;   // True during CATCHUP
+    fromCache?: boolean;    // True if data came from the store, not the server
+}
+```
+
+## `startClient()` options
+
+Passed as `IStartClientOpts` to `client.startClient()`:
+
+```typescript
+await client.startClient({
+    initialSyncLimit: 20,       // Events per room on first sync (default: 8)
+    lazyLoadMembers: true,      // Don't load all members on startup
+    pollTimeout: 30_000,        // /sync timeout in ms (default: 30 000)
+    threadSupport: true,        // Organise thread relations into Thread objects
+    disablePresence: false,     // Send presence updates (default: false = enabled)
+});
+```
+
+<Note>
+Setting `lazyLoadMembers: true` significantly reduces initial sync payload in large rooms. Members are loaded on demand when you call `room.loadMembersIfNeeded()`.
+</Note>
+
+## Presence
+
+The `SetPresence` enum controls the `set_presence` parameter sent to `/sync`:
+
+```typescript
+export enum SetPresence {
+    Offline     = "offline",
+    Online      = "online",
+    Unavailable = "unavailable",
+}
+```
+
+Pass `disablePresence: true` to `startClient()` to suppress automatic presence advertisements entirely.
+
+## Pagination (scrollback)
+
+To load older events for a room, call `scrollback`:
+
+```typescript
+const room = client.getRoom("!roomId:server");
+if (!room) return;
+
+// Load up to 30 more events going backwards from the current start of the timeline
+const updatedRoom = await client.scrollback(room, 30);
+```
+
+The SDK throttles back-pagination requests with a `SCROLLBACK_DELAY_MS` (3 000 ms) guard to avoid hammering the server.
+
+<Tip>
+Listen for `RoomEvent.Timeline` with `toStartOfTimeline === true` to detect when paginated events arrive at the beginning of the timeline.
+</Tip>
+
+## Sliding Sync (MSC4186)
+
+Sliding Sync is an experimental alternative to the classic `/sync` API, designed for much faster initial load times by delivering only the rooms the client currently needs.
+
+To opt in, construct a `SlidingSync` instance and pass it to `startClient()`:
+
+```typescript
+import { SlidingSync } from "matrix-js-sdk";
+
+const slidingSync = new SlidingSync(
+    "https://proxy.matrix.org",
+    new Map(),      // Initial list ranges
+    {},             // Room subscription parameters
+    client,
+    30_000,         // Timeout
+);
+
+await client.startClient({ slidingSync });
+```
+
+<Warning>
+Sliding Sync requires a homeserver (or proxy) that supports MSC4186. It is marked `@experimental` in the SDK. The classic `/sync` path remains the default and is suitable for all production deployments.
+</Warning>
+
+## Stopping the client
+
+```typescript
+client.stopClient();
+// ClientEvent.Sync fires one final time with SyncState.Stopped
+```
+
+After `stopClient()`, the `SyncState` transitions to `STOPPED` and no further sync requests are issued. You can restart the sync loop by calling `startClient()` again.

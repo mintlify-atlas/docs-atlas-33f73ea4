@@ -1,0 +1,182 @@
+---
+title: "MatrixClient"
+description: "The central object for all Matrix operations in matrix-js-sdk."
+keywords: ["MatrixClient", "createClient", "startClient", "stopClient", "ClientEvent"]
+---
+
+`MatrixClient` is the main entry point for the matrix-js-sdk. Every interaction with a Matrix homeserver — syncing, sending events, managing rooms, calling APIs — goes through a single `MatrixClient` instance. It extends `TypedEventEmitter`, so your application reacts to state changes and incoming data by registering event listeners rather than polling.
+
+## Creating a client
+
+Use the `createClient` helper exported from `matrix-js-sdk`. It accepts an `ICreateClientOpts` object.
+
+```typescript
+import * as sdk from "matrix-js-sdk";
+
+const client = sdk.createClient({
+    baseUrl: "https://matrix.org",
+    accessToken: "your_access_token",
+    userId: "@alice:matrix.org",
+    deviceId: "DEVICE_ID",
+});
+```
+
+### Key options
+
+<AccordionGroup>
+  <Accordion title="baseUrl (required)">
+    The base URL of the homeserver, e.g. `https://matrix.org`. All HTTP requests are made relative to this URL.
+  </Accordion>
+  <Accordion title="accessToken">
+    The access token to authenticate requests. Omit only if the client will be used unauthenticated (e.g. to list public rooms).
+  </Accordion>
+  <Accordion title="userId">
+    The fully-qualified Matrix user ID (`@localpart:server`). Required for most authenticated operations.
+  </Accordion>
+  <Accordion title="deviceId">
+    A unique identifier for this device. Required when end-to-end encryption is enabled — if unset, E2EE is disabled.
+  </Accordion>
+  <Accordion title="store">
+    An `IStore` implementation for persisting sync data. Defaults to a `MemoryStore` if omitted. See [Storage](/concepts/storage) for details.
+  </Accordion>
+  <Accordion title="scheduler">
+    A `MatrixScheduler` instance for queuing and retrying outbound events. Without one, failed sends are not retried automatically.
+  </Accordion>
+  <Accordion title="cryptoStore">
+    A `CryptoStore` for E2EE session data. Used by the legacy crypto stack and for migration to the Rust crypto backend.
+  </Accordion>
+  <Accordion title="logger">
+    A custom `Logger` instance. Defaults to the built-in global logger.
+  </Accordion>
+</AccordionGroup>
+
+## Starting and stopping the client
+
+Creating a client does not start syncing. Call `startClient()` to begin the sync loop, and `stopClient()` to shut it down.
+
+<Steps>
+  <Step title="Create the client">
+    ```typescript
+    const client = sdk.createClient({
+        baseUrl: "https://matrix.org",
+        accessToken: myAccessToken,
+        userId: myUserId,
+    });
+    ```
+  </Step>
+  <Step title="Register a sync listener before starting">
+    Register at least a `ClientEvent.Sync` listener before calling `startClient()` so you don't miss the initial `PREPARED` transition.
+
+    ```typescript
+    client.once(ClientEvent.Sync, (state, prevState, data) => {
+        if (state === "PREPARED") {
+            console.log("Client ready — rooms:", client.getRooms().length);
+        }
+    });
+    ```
+  </Step>
+  <Step title="Start the client">
+    ```typescript
+    await client.startClient({ initialSyncLimit: 10 });
+    ```
+  </Step>
+  <Step title="Stop the client when done">
+    ```typescript
+    client.stopClient();
+    ```
+  </Step>
+</Steps>
+
+### `IStartClientOpts`
+
+The options object passed to `startClient()` controls sync behaviour:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `initialSyncLimit` | `number` | `8` | Number of events to fetch per room on first sync |
+| `lazyLoadMembers` | `boolean` | `false` | Defer loading room members until explicitly requested |
+| `pendingEventOrdering` | `PendingEventOrdering` | `chronological` | Where locally-sent (pending) events appear in the timeline |
+| `pollTimeout` | `number` | `30000` | Milliseconds to hold open each `/sync` long-poll request |
+| `disablePresence` | `boolean` | `false` | Suppress automatic presence updates |
+| `threadSupport` | `boolean` | `false` | Organise events into `Thread` objects when thread relations are found |
+| `slidingSync` | `SlidingSync` | — | Pass a `SlidingSync` instance to use MSC4186 instead of the classic sync API |
+
+## The event-driven model
+
+`MatrixClient` extends `TypedEventEmitter`. Rather than polling the client for new data, register listeners for the events you care about.
+
+```typescript
+import { ClientEvent, RoomEvent, RoomMemberEvent } from "matrix-js-sdk";
+
+// Every raw event received over /sync
+client.on(ClientEvent.Event, (event) => {
+    console.log("Received event:", event.getType());
+});
+
+// Account data changes
+client.on(ClientEvent.AccountData, (event, oldEvent) => {
+    console.log("Account data updated:", event.getType());
+});
+
+// A new room was added (invite or join)
+client.on(ClientEvent.Room, (room) => {
+    console.log("New room:", room.roomId);
+});
+
+// A room was forgotten
+client.on(ClientEvent.DeleteRoom, (roomId) => {
+    console.log("Room deleted:", roomId);
+});
+
+// Typing changes — re-emitted from RoomMember
+client.on(RoomMemberEvent.Typing, (event, member) => {
+    if (member.typing) {
+        console.log(member.name, "is typing...");
+    }
+});
+```
+
+### `ClientEvent` enum
+
+| Value | Constant | Description |
+|---|---|---|
+| `"sync"` | `ClientEvent.Sync` | Sync state changed (see [Sync](/concepts/sync)) |
+| `"event"` | `ClientEvent.Event` | A live event arrived via `/sync` |
+| `"accountData"` | `ClientEvent.AccountData` | User-scoped account data was updated |
+| `"Room"` | `ClientEvent.Room` | A new room object was created |
+| `"deleteRoom"` | `ClientEvent.DeleteRoom` | A room was forgotten |
+| `"WellKnown.client"` | `ClientEvent.ClientWellKnown` | `.well-known` data was fetched |
+| `"turnServers"` | `ClientEvent.TurnServers` | TURN server credentials refreshed |
+
+<Note>
+`ClientEvent.ToDeviceEvent` is deprecated. Use `ClientEvent.ReceivedToDeviceMessage` instead, which also provides encryption metadata.
+</Note>
+
+## Authenticated versus unauthenticated usage
+
+A `MatrixClient` without `accessToken`/`userId` can still make unauthenticated requests such as listing public rooms:
+
+```typescript
+const anonClient = sdk.createClient({ baseUrl: "https://matrix.org" });
+const data = await anonClient.publicRooms();
+console.log("Public rooms:", data.chunk.length);
+```
+
+## Widget embedding
+
+For Matrix widget integrations, use `createRoomWidgetClient` instead of `createClient`. It sets up a client pre-wired to communicate over the widget postMessage transport.
+
+```typescript
+import { createRoomWidgetClient } from "matrix-js-sdk";
+
+const widgetClient = createRoomWidgetClient(
+    widgetApi,
+    capabilities,
+    roomId,
+    opts,
+);
+```
+
+<Tip>
+Widgets run inside an iframe alongside a Matrix client; `createRoomWidgetClient` handles the capability negotiation and postMessage plumbing automatically.
+</Tip>

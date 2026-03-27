@@ -1,0 +1,91 @@
+---
+title: "Introduction"
+description: "matrix-js-sdk is the official Matrix Client-Server SDK for JavaScript and TypeScript, supporting both Node.js and browser environments."
+keywords: ["matrix", "matrix-js-sdk", "javascript", "typescript", "sdk", "client-server"]
+---
+
+`matrix-js-sdk` is the official [Matrix](https://matrix.org) Client-Server SDK for JavaScript and TypeScript. It provides a full object model around the Matrix Client-Server API, emits events for incoming data and state changes, and handles the complexity of syncing, encryption, and real-time communication so your application does not have to.
+
+Development and maintenance is sponsored by [Element](https://element.io), which uses this SDK in their flagship [Element Web](https://github.com/element-hq/element-web) and [Element Desktop](https://github.com/element-hq/element-desktop) clients.
+
+<Note>
+  The minimum supported Matrix server version is **v1.1**. The SDK aims for maximum backwards compatibility but only guarantees support for a feature across at least 4 spec releases.
+</Note>
+
+## What the SDK does
+
+Beyond wrapping the Matrix HTTP API, `matrix-js-sdk` handles a wide range of functionality automatically:
+
+- **Syncing** — manages the `/sync` loop and keeps local state up to date
+- **Room and member names** — generates friendly display names and tracks historical `RoomMember` information
+- **State management** — tracks typing indicators, power levels, and membership changes across events
+- **High-level models** — exposes `Room`, `RoomState`, `RoomMember`, and `User` objects you can listen to directly
+- **Local echo** — messages appear in the timeline as `sending` immediately, before the server confirms them
+- **Automatic retries** — retries failed sends due to network errors or rate limiting
+- **Message queuing** — queues outgoing messages and processes them in order
+- **Pagination** — handles scrollback and timeline pagination
+- **Push actions** — assigns push notification actions for incoming events
+- **WebRTC calling** — supports 1:1 and group VoIP/video calls
+- **End-to-end encryption** — powered by the Rust `matrix-sdk-crypto` library via WebAssembly bindings
+- **OIDC authentication** — supports OpenID Connect login flows
+
+## Key capabilities
+
+<CardGroup cols={2}>
+  <Card title="Real-time sync" icon="rotate">
+    Maintains a live connection to the homeserver via `/sync`, keeping rooms, members, and timeline state current without manual polling.
+  </Card>
+  <Card title="End-to-end encryption" icon="lock">
+    Built on the Rust `matrix-sdk-crypto` WASM bindings. Supports secret storage, cross-signing, and key backup.
+  </Card>
+  <Card title="WebRTC calling" icon="phone">
+    Supports both 1:1 calls (`MatrixCall`) and group calls (`GroupCall`) with full media handler integration.
+  </Card>
+  <Card title="OIDC support" icon="key">
+    Implements OpenID Connect login flows for homeservers that support delegated authentication.
+  </Card>
+  <Card title="Event-driven model" icon="bell">
+    `MatrixClient`, `Room`, `RoomMember`, and other objects implement `EventEmitter`, so you can subscribe to granular state changes.
+  </Card>
+  <Card title="TypeScript-first" icon="code">
+    Written in TypeScript with full type declarations shipped in the package. Separate entry points expose low-level spec types and the crypto API.
+  </Card>
+</CardGroup>
+
+## Entry points
+
+The package ships several entry points. Import only what you need to keep bundle sizes small.
+
+| Entry point | Description |
+|---|---|
+| `matrix-js-sdk` | Primary entry point. High-level client, models, events, stores, and utilities. |
+| `matrix-js-sdk/lib/crypto-api` | Cryptography interface (`CryptoApi`). Use this for E2E encryption operations. |
+| `matrix-js-sdk/lib/types` | Low-level types that reflect data structures defined in the Matrix specification. |
+| `matrix-js-sdk/lib/testing` | Test utilities. Useful in test code; do not use in production. |
+| `matrix-js-sdk/lib/utils/*.js` | Individual utility modules exporting standalone functions and their types. |
+
+## Supported platforms
+
+<CardGroup cols={2}>
+  <Card title="Node.js" icon="server">
+    Requires Node.js **22.0.0 or later** (latest LTS recommended). The `main` field in `package.json` points to `./lib/index.js`.
+  </Card>
+  <Card title="Browser" icon="globe">
+    Use via a bundler such as Webpack or Vite. The `browser` field in `package.json` points to `./lib/browser-index.js`, which automatically configures IndexedDB as the crypto store when available.
+  </Card>
+</CardGroup>
+
+<Tip>
+  You can also use the SDK with [Deno](https://deno.land/) via `import npm:matrix-js-sdk`, but Deno is not officially supported.
+</Tip>
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install the SDK, create a client, start syncing, and send your first message in minutes.
+  </Card>
+  <Card title="Installation" icon="package" href="/installation">
+    Detailed install instructions, entry point reference, and TypeScript configuration.
+  </Card>
+</CardGroup>

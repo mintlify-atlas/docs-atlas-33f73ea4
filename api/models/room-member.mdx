@@ -1,0 +1,190 @@
+---
+title: "RoomMember"
+description: "The RoomMember class represents a user's membership in a specific Matrix room, including their power level, display name, and typing state."
+---
+
+A `RoomMember` represents a single user's participation in a Matrix room. Each room
+maintains a `RoomMember` instance per user it knows about, accessible via
+`room.getMember(userId)` or `room.getMembers()`.
+
+```typescript
+const member = room.getMember("@alice:matrix.org");
+console.log(member?.name, member?.membership);
+```
+
+## Constructor
+
+```typescript
+new RoomMember(
+  roomId: string,
+  userId: string
+)
+```
+
+## Properties
+
+<ResponseField name="userId" type="string" required>
+  The immutable user ID of this member, e.g. `@alice:matrix.org`.
+</ResponseField>
+
+<ResponseField name="roomId" type="string" required>
+  The immutable room ID this member belongs to.
+</ResponseField>
+
+<ResponseField name="name" type="string" required>
+  The human-readable display name for this member. If another member in the room
+  shares the same display name, this is disambiguated with a suffix of
+  `" (@user_id:server)"`. Falls back to the user ID if no display name is set.
+</ResponseField>
+
+<ResponseField name="rawDisplayName" type="string" required>
+  The ambiguous display name with minimal preprocessing: direction-override characters
+  (RTO/LRO) are stripped, and empty or blank names fall back to the user ID. Unlike
+  `name`, this is **not** disambiguated across members.
+</ResponseField>
+
+<ResponseField name="membership" type="Membership | undefined">
+  The current membership state of this member. One of the `KnownMembership` values
+  (`join`, `leave`, `invite`, `ban`, `knock`) or a custom string.
+</ResponseField>
+
+<ResponseField name="powerLevel" type="number" required>
+  The power level of this member in the room. Defaults to `0`. Typical values:
+
+  | Level | Role |
+  |---|---|
+  | `100` | Room administrator |
+  | `50` | Room moderator |
+  | `0` | Regular user |
+</ResponseField>
+
+<ResponseField name="typing" type="boolean" required>
+  `true` if this member is currently typing in the room.
+</ResponseField>
+
+<ResponseField name="user" type="User | undefined">
+  The `User` object for this member, if one exists. The `User` object tracks
+  global presence and profile data, while `RoomMember` tracks room-specific state.
+</ResponseField>
+
+<ResponseField name="disambiguate" type="boolean" required>
+  `true` if the member's display name is currently being disambiguated because another
+  member in the room shares the same name.
+</ResponseField>
+
+<ResponseField name="events" type="{ member?: MatrixEvent }" required>
+  The underlying `m.room.member` state event for this member, if available.
+</ResponseField>
+
+## Methods
+
+### `setMembershipEvent(event, roomState?)`
+
+```typescript
+public setMembershipEvent(event: MatrixEvent, roomState?: RoomState): void
+```
+
+Updates this member's state from an `m.room.member` event. May fire
+`RoomMemberEvent.Name` and `RoomMemberEvent.Membership`.
+
+### `isOutOfBand()`
+
+```typescript
+public isOutOfBand(): boolean
+```
+
+Returns `true` if this member was loaded from an out-of-band source (e.g. a lazy
+member load) rather than from the live sync stream.
+
+## KnownMembership Enum
+
+Well-known membership state values defined by the Matrix spec:
+
+| Value | String | Description |
+|---|---|---|
+| `KnownMembership.Join` | `"join"` | The user has joined the room and may participate. |
+| `KnownMembership.Leave` | `"leave"` | The user was once joined but has since left (or been kicked). |
+| `KnownMembership.Invite` | `"invite"` | The user has been invited but has not yet joined. |
+| `KnownMembership.Ban` | `"ban"` | The user has been banned and may not join until unbanned. |
+| `KnownMembership.Knock` | `"knock"` | The user has knocked on the room, requesting permission to join. |
+
+The `Membership` type is `KnownMembership | string` to allow for future spec additions.
+
+## RoomMemberEvent Enum
+
+Events emitted by `RoomMember` instances (and re-emitted by `MatrixClient`):
+
+| Value | String | Description |
+|---|---|---|
+| `RoomMemberEvent.Membership` | `"RoomMember.membership"` | The member's membership state changed. Handler: `(event, member, oldMembership)` |
+| `RoomMemberEvent.Name` | `"RoomMember.name"` | The member's display name changed. Handler: `(event, member, oldName)` |
+| `RoomMemberEvent.PowerLevel` | `"RoomMember.powerLevel"` | The member's power level changed. Handler: `(event, member)` |
+| `RoomMemberEvent.Typing` | `"RoomMember.typing"` | The member's typing state changed. Handler: `(event, member)` |
+
+## Power Levels
+
+Power levels control what actions a member can perform in a room. The room's
+`m.room.power_levels` state event defines the thresholds. You can read the full
+configuration from `room.currentState`:
+
+```typescript
+import { EventType } from "matrix-js-sdk";
+
+const plEvent = room.currentState.getStateEvents(EventType.RoomPowerLevels, "");
+const content = plEvent?.getContent();
+// content.users_default — default power level for all users
+// content.events — required levels to send specific event types
+// content.ban, content.kick, content.redact — moderation action thresholds
+```
+
+## Code Example
+
+```typescript
+import {
+  MatrixClient,
+  RoomMemberEvent,
+  KnownMembership,
+} from "matrix-js-sdk";
+
+// Check if someone has joined
+const member = room.getMember("@alice:matrix.org");
+if (member?.membership === KnownMembership.Join) {
+  console.log(`${member.name} is in the room (power: ${member.powerLevel})`);
+}
+
+// List all invited members
+const invited = room.getMembersWithMembership(KnownMembership.Invite);
+for (const m of invited) {
+  console.log(`Pending invite: ${m.userId}`);
+}
+
+// React to membership changes
+client.on(RoomMemberEvent.Membership, (event, member, oldMembership) => {
+  if (member.membership === KnownMembership.Join && oldMembership !== KnownMembership.Join) {
+    console.log(`${member.name} just joined ${member.roomId}`);
+  } else if (member.membership === KnownMembership.Leave) {
+    console.log(`${member.name} left ${member.roomId}`);
+  }
+});
+
+// React to name changes
+client.on(RoomMemberEvent.Name, (event, member, oldName) => {
+  console.log(`${oldName ?? member.userId} is now known as ${member.name}`);
+});
+
+// React to typing indicators
+client.on(RoomMemberEvent.Typing, (event, member) => {
+  if (member.typing) {
+    console.log(`${member.name} is typing…`);
+  }
+});
+
+// Get avatar URL (HTTP, not MXC)
+const avatarUrl = member?.getAvatarUrl(
+  client.baseUrl,
+  96, 96,
+  "crop",
+  true, // allow directUrl
+  false // allowDefault
+);
+```

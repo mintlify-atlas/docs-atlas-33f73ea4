@@ -1,0 +1,275 @@
+---
+title: "MatrixRTC"
+description: "Next-generation group calling using MatrixRTCSession and LiveKit transport."
+---
+
+MatrixRTC is the modern Matrix calling architecture that replaces the legacy `GroupCall` mesh topology. Instead of establishing a direct WebRTC peer connection between every pair of participants, MatrixRTC routes media through a Selective Forwarding Unit (SFU) — typically a [LiveKit](https://livekit.io/) server — while Matrix handles signalling and membership.
+
+<CardGroup cols={2}>
+  <Card title="Scalable" icon="arrows-maximize">
+    SFU-based routing supports large calls without O(n²) connections.
+  </Card>
+  <Card title="E2E Encrypted" icon="lock">
+    Per-call media keys distributed via to-device messages keep calls private end-to-end.
+  </Card>
+  <Card title="Membership via room state" icon="users">
+    Participants are tracked with `m.call.member` / `m.rtc.member` state events.
+  </Card>
+  <Card title="Transport-agnostic" icon="plug">
+    The MatrixRTC layer only manages membership and keys; media transport is pluggable.
+  </Card>
+</CardGroup>
+
+## MatrixRTC vs legacy GroupCall
+
+| Feature | Legacy GroupCall | MatrixRTC |
+|---|---|---|
+| Media routing | Peer-to-peer mesh | SFU (LiveKit) |
+| Scales to | ~4–6 participants | Hundreds of participants |
+| Signalling | `m.call.*` to-device messages | `m.call.member` state events |
+| E2E encryption | Optional | Built-in via `ToDeviceKeyTransport` |
+| SDK support class | `GroupCall` | `MatrixRTCSession` |
+
+<Note>
+Legacy `GroupCall` is still available but new applications should use `MatrixRTCSession`.
+</Note>
+
+## Key classes
+
+### MatrixRTCSessionManager
+
+`MatrixRTCSessionManager` is the top-level manager. It watches for `m.call.member` state events across all rooms and maintains a single `MatrixRTCSession` object per room.
+
+Access it through the client:
+
+```typescript
+// The client exposes a pre-configured session manager
+const sessionManager = client.matrixRTC;
+
+// Start listening for session events
+sessionManager.start();
+
+// Get the active session for a room (undefined if no active participants)
+const room = client.getRoom(roomId)!;
+const activeSession = sessionManager.getActiveRoomSession(room);
+
+// Or get-or-create a session object for the room
+const session = sessionManager.getRoomSession(room);
+```
+
+Listen for sessions starting and ending across the client:
+
+```typescript
+import { MatrixRTCSessionManagerEvents } from "matrix-js-sdk";
+
+sessionManager.on(
+    MatrixRTCSessionManagerEvents.SessionStarted,
+    (roomId: string, session: MatrixRTCSession) => {
+        console.log(`MatrixRTC session started in ${roomId}`);
+    },
+);
+
+sessionManager.on(
+    MatrixRTCSessionManagerEvents.SessionEnded,
+    (roomId: string, session: MatrixRTCSession) => {
+        console.log(`MatrixRTC session ended in ${roomId}`);
+    },
+);
+```
+
+Stop the manager on client shutdown:
+
+```typescript
+sessionManager.stop();
+```
+
+### MatrixRTCSession
+
+`MatrixRTCSession` manages membership and encryption keys for a single room's RTC session. It does **not** handle media — that is the responsibility of your LiveKit integration.
+
+```typescript
+import {
+    MatrixRTCSession,
+    MatrixRTCSessionEvent,
+} from "matrix-js-sdk";
+```
+
+## Joining a MatrixRTC session
+
+<Steps>
+
+### Get the session object
+
+```typescript
+const room = client.getRoom(roomId)!;
+const session = client.matrixRTC.getRoomSession(room);
+```
+
+### Listen for membership and key changes
+
+```typescript
+session.on(
+    MatrixRTCSessionEvent.MembershipsChanged,
+    (oldMemberships, newMemberships) => {
+        console.log(`Memberships changed: ${newMemberships.length} participants`);
+        for (const m of newMemberships) {
+            console.log(" -", m.userId, m.deviceId);
+        }
+    },
+);
+
+session.on(
+    MatrixRTCSessionEvent.EncryptionKeyChanged,
+    (key, keyIndex, membership, rtcBackendIdentity) => {
+        // Pass the key to your LiveKit encryption layer
+        myLiveKitClient.setEncryptionKey(membership.memberId, key, keyIndex);
+    },
+);
+
+session.on(MatrixRTCSessionEvent.JoinStateChanged, (isJoined: boolean) => {
+    console.log(isJoined ? "Joined RTC session" : "Left RTC session");
+});
+```
+
+### Join the session
+
+```typescript
+session.joinRoomSession(
+    /*fociPreferred=*/ [{ type: "livekit", livekit_service_url: "https://livekit.example.org" }],
+    /*multiSfuFocus=*/ undefined,
+    /*joinConfig=*/ {
+        manageMediaKeys: true, // generate and distribute E2EE media keys
+    },
+);
+```
+
+### Connect to LiveKit using the provided focus
+
+Once joined, read the active foci from the session memberships to obtain the LiveKit URL, then connect using the LiveKit SDK:
+
+```typescript
+const myMembership = session.memberships.find(
+    (m) => m.userId === client.getUserId() && m.deviceId === client.getDeviceId(),
+);
+const focus = myMembership?.getPreferredFoci()[0];
+if (focus?.type === "livekit") {
+    await livekitRoom.connect(focus.livekit_service_url, livekitToken);
+}
+```
+
+</Steps>
+
+## Leaving a session
+
+```typescript
+// Leave and wait for the membership event to be sent (with optional timeout in ms)
+const didLeave = await session.leaveRoomSession(/* timeoutMs= */ 5000);
+
+if (!didLeave) {
+    console.warn("Leave timed out — membership event may not have been sent");
+}
+```
+
+## Reading current memberships
+
+`session.memberships` is an array of `CallMembership` objects, each representing an active participant:
+
+```typescript
+for (const membership of session.memberships) {
+    console.log(
+        `User ${membership.userId} on device ${membership.deviceId}`,
+        "foci:", membership.getPreferredFoci(),
+        "expires:", new Date(membership.getMsUntilExpiry() + Date.now()),
+    );
+}
+
+// Check if we are joined
+console.log("Am I joined?", session.isJoined());
+```
+
+## End-to-end encryption
+
+MatrixRTC encrypts media at the application layer using symmetric keys distributed between participants over **to-device messages** (`ToDeviceKeyTransport`). The flow is:
+
+1. When `manageMediaKeys: true` is set in `joinRoomSession`, the SDK generates a random media key for this device.
+2. The key is sent to every other session participant over encrypted to-device messages.
+3. When participants join or leave, the key is rotated (with a configurable `keyRotationGracePeriodMs` delay to batch rapid membership changes).
+4. The SDK emits `MatrixRTCSessionEvent.EncryptionKeyChanged` whenever a new key arrives — pass this to the LiveKit `E2EEManager`.
+
+```typescript
+session.on(
+    MatrixRTCSessionEvent.EncryptionKeyChanged,
+    (
+        key: Uint8Array,
+        encryptionKeyIndex: number,
+        membership: CallMembershipIdentityParts,
+        rtcBackendIdentity: string,
+    ) => {
+        // The key is a raw Uint8Array — hand it to LiveKit E2EE
+        e2eeManager.setKey({
+            participantIdentity: rtcBackendIdentity,
+            keyIndex: encryptionKeyIndex,
+            key,
+        });
+    },
+);
+```
+
+### Encryption configuration
+
+```typescript
+session.joinRoomSession(
+    fociPreferred,
+    multiSfuFocus,
+    {
+        manageMediaKeys: true,
+
+        // Grace period before rotating after a membership change (ms)
+        keyRotationGracePeriodMs: 5_000,
+
+        // Delay before switching to a new key, giving peers time to receive it (ms)
+        useKeyDelay: 2_000,
+    },
+);
+```
+
+<Warning>
+Do not pass `manageMediaKeys: false` (or omit it) if you want end-to-end encrypted calls. Without key management the media stream will not be encrypted at the application layer.
+</Warning>
+
+## MatrixRTCSessionEvent reference
+
+```typescript
+export enum MatrixRTCSessionEvent {
+    // A participant joined, left, or updated their membership.
+    MembershipsChanged    = "memberships_changed",
+    // Our own local joined/left state changed.
+    JoinStateChanged      = "join_state_changed",
+    // A media encryption key for a participant changed.
+    EncryptionKeyChanged  = "encryption_key_changed",
+    // The membership manager encountered an unrecoverable error.
+    MembershipManagerError = "membership_manager_error",
+    // A call notification was sent (first member to join).
+    DidSendCallNotification = "did_send_call_notification",
+}
+```
+
+## Session lifecycle diagram
+
+```
+getRoomSession(room)
+       │
+  joinRoomSession()  ──────────────────────────────────────────┐
+       │                                                         │
+       ▼                                                         │
+  m.call.member event sent to room              MembershipsChanged events
+       │                                        EncryptionKeyChanged events
+       ▼
+  LiveKit connect()  (your code)
+       │
+       ▼
+  leaveRoomSession()
+       │
+       ▼
+  m.call.member cleared
+```

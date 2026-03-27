@@ -1,0 +1,344 @@
+---
+title: "VoIP calling"
+description: "Place and receive 1:1 and multi-party WebRTC calls using MatrixCall and GroupCall."
+---
+
+The matrix-js-sdk provides full WebRTC calling support through two complementary APIs:
+
+- **`MatrixCall`** — 1:1 calls between two Matrix users
+- **`GroupCall`** — multi-party calls across a room
+
+Both are built on WebRTC and signalled via Matrix room events.
+
+<Note>
+MatrixRTC (LiveKit-based) is the recommended path for new multi-party calling features. `GroupCall` is the legacy implementation. See the [MatrixRTC guide](/guides/matrixrtc) for the modern approach.
+</Note>
+
+## 1:1 calls with MatrixCall
+
+### Placing an outbound call
+
+Use `createNewMatrixCall()` to create a call object, then invoke `placeVoiceCall()` or `placeVideoCall()` to initiate it.
+
+```typescript
+import { createNewMatrixCall, CallEvent, CallState } from "matrix-js-sdk";
+
+// Create the call
+const call = createNewMatrixCall(client, roomId);
+
+// Listen for state changes before placing
+call.on(CallEvent.State, (newState: CallState, oldState: CallState) => {
+    console.log(`Call state: ${oldState} -> ${newState}`);
+});
+
+call.on(CallEvent.Hangup, () => {
+    console.log("Call ended");
+});
+
+call.on(CallEvent.Error, (err) => {
+    console.error("Call error:", err.code, err.message);
+});
+
+// Place a video call
+await call.placeVideoCall();
+
+// — or — place a voice-only call
+await call.placeVoiceCall();
+```
+
+### Receiving an incoming call
+
+Listen for `CallEventHandlerEvent.Incoming` on the client to receive inbound calls:
+
+```typescript
+import { CallEvent, CallEventHandlerEvent } from "matrix-js-sdk";
+
+client.on(CallEventHandlerEvent.Incoming, (incomingCall) => {
+    console.log("Incoming call from", incomingCall.getOpponentMember()?.name);
+
+    // Attach media feed listeners before answering
+    incomingCall.on(CallEvent.FeedsChanged, (feeds) => {
+        const localFeed  = feeds.find((f) => f.isLocal());
+        const remoteFeed = feeds.find((f) => !f.isLocal());
+
+        if (remoteFeed) {
+            remoteVideoElement.srcObject = remoteFeed.stream;
+            remoteVideoElement.play();
+        }
+        if (localFeed) {
+            localVideoElement.muted = true;
+            localVideoElement.srcObject = localFeed.stream;
+            localVideoElement.play();
+        }
+    });
+
+    // Answer the call
+    incomingCall.answer();
+});
+```
+
+### Hanging up
+
+```typescript
+call.hangup();
+```
+
+## Call states and lifecycle
+
+The `CallState` enum describes every stage a call goes through:
+
+```typescript
+export enum CallState {
+    Fledgling    = "fledgling",      // Just created, not yet dialling
+    InviteSent   = "invite_sent",    // Invite sent, waiting for answer
+    WaitLocalMedia = "wait_local_media", // Acquiring camera/mic
+    CreateOffer  = "create_offer",   // Creating WebRTC offer
+    CreateAnswer = "create_answer",  // Creating WebRTC answer
+    Connecting   = "connecting",     // ICE negotiation in progress
+    Connected    = "connected",      // Media flowing
+    Ringing      = "ringing",        // Remote party is ringing
+    Ended        = "ended",          // Call terminated
+}
+```
+
+A typical outbound call progresses: `Fledgling → WaitLocalMedia → CreateOffer → InviteSent → Connecting → Connected → Ended`.
+
+## CallEvent reference
+
+```typescript
+export enum CallEvent {
+    Hangup                = "hangup",
+    State                 = "state",
+    Error                 = "error",
+    Replaced              = "replaced",
+    LocalHoldUnhold       = "local_hold_unhold",
+    RemoteHoldUnhold      = "remote_hold_unhold",
+    FeedsChanged          = "feeds_changed",
+    AssertedIdentityChanged = "asserted_identity_changed",
+    LengthChanged         = "length_changed",
+    DataChannel           = "datachannel",
+    SendVoipEvent         = "send_voip_event",
+    PeerConnectionCreated = "peer_connection_created",
+}
+```
+
+<Accordion title="CallErrorCode values">
+
+| Code | Meaning |
+|---|---|
+| `UserHangup` | The local user ended the call |
+| `LocalOfferFailed` | Could not create a local WebRTC offer |
+| `NoUserMedia` | Microphone/camera access was denied or unavailable |
+| `UnknownDevices` | Unknown devices present — encryption barrier |
+| `SendInvite` | Failed to send the invite event |
+| `IceFailed` | No ICE connectivity could be established |
+| `InviteTimeout` | Remote party did not answer in time |
+| `AnsweredElsewhere` | A different device answered the call |
+| `UserBusy` | Remote party rejected as busy |
+
+</Accordion>
+
+## Media handling with MediaHandler
+
+`client.getMediaHandler()` returns the `MediaHandler` instance that manages local camera and microphone streams. Configure it before or during a call.
+
+```typescript
+const mediaHandler = client.getMediaHandler();
+
+// Switch the active microphone
+await mediaHandler.setAudioInput("device-id-from-enumerateDevices");
+
+// Switch the active camera
+await mediaHandler.setVideoInput("device-id-from-enumerateDevices");
+
+// Set both at once
+await mediaHandler.setMediaInputs(audioDeviceId, videoDeviceId);
+
+// Configure audio processing
+await mediaHandler.setAudioSettings({
+    autoGainControl: true,
+    echoCancellation: true,
+    noiseSuppression: true,
+});
+```
+
+The `MediaHandler` emits `MediaHandlerEvent.LocalStreamsChanged` when its streams change:
+
+```typescript
+import { MediaHandlerEvent } from "matrix-js-sdk";
+
+client.getMediaHandler().on(MediaHandlerEvent.LocalStreamsChanged, () => {
+    console.log("Local streams updated");
+});
+```
+
+### Screensharing
+
+```typescript
+// Browser (getDisplayMedia)
+await call.setScreensharingEnabled(true);
+
+// Electron (DesktopCapturer)
+await call.setScreensharingEnabled(true, {
+    desktopCapturerSourceId: sourceId,
+});
+
+// Disable screensharing
+await call.setScreensharingEnabled(false);
+```
+
+## Multi-party calling with GroupCall
+
+`GroupCall` manages a mesh of 1:1 `MatrixCall` objects across all participants in a room.
+
+### GroupCallType and GroupCallIntent
+
+```typescript
+export enum GroupCallType {
+    Video = "m.video",
+    Voice = "m.voice",
+}
+
+export enum GroupCallIntent {
+    Ring   = "m.ring",    // Notify all room members (incoming call UI)
+    Prompt = "m.prompt",  // Prompt members to join
+    Room   = "m.room",    // Persistent room-scoped call
+}
+```
+
+### Creating and entering a GroupCall
+
+```typescript
+import {
+    GroupCall,
+    GroupCallType,
+    GroupCallIntent,
+    GroupCallEvent,
+    GroupCallState,
+} from "matrix-js-sdk";
+
+const groupCall = new GroupCall(
+    client,
+    room,
+    GroupCallType.Video,
+    /*isPtt=*/ false,
+    GroupCallIntent.Room,
+);
+
+// Create the group call state event in the room
+await groupCall.create();
+
+// Listen for state changes
+groupCall.on(GroupCallEvent.GroupCallStateChanged, (newState: GroupCallState, oldState: GroupCallState) => {
+    console.log(`GroupCall state: ${oldState} -> ${newState}`);
+});
+
+// Listen for participant list changes
+groupCall.on(GroupCallEvent.ParticipantsChanged, (participants) => {
+    console.log("Participants:", [...participants.keys()].map((m) => m.name));
+});
+
+// Listen for errors
+groupCall.on(GroupCallEvent.Error, (err) => {
+    console.error("GroupCall error:", err.code, err.message);
+});
+
+// Enter the call (acquires local media and connects to all members)
+await groupCall.enter();
+```
+
+### GroupCallState lifecycle
+
+```typescript
+export enum GroupCallState {
+    LocalCallFeedUninitialized = "local_call_feed_uninitialized",
+    InitializingLocalCallFeed = "initializing_local_call_feed",
+    LocalCallFeedInitialized  = "local_call_feed_initialized",
+    Entered = "entered",
+    Ended   = "ended",
+}
+```
+
+### Muting and screensharing in a GroupCall
+
+```typescript
+// Mute/unmute audio
+groupCall.setMicrophoneMuted(true);
+
+// Mute/unmute video
+groupCall.setLocalVideoMuted(true);
+
+// Start screensharing
+await groupCall.setScreensharingEnabled(true);
+```
+
+### Leaving a GroupCall
+
+```typescript
+await groupCall.leave();
+```
+
+## Complete 1:1 call example
+
+The following example is based on the [VoIP browser demo](https://github.com/matrix-org/matrix-js-sdk/tree/develop/examples/voip):
+
+```javascript
+import * as matrixcs from "matrix-js-sdk";
+
+const client = matrixcs.createClient({
+    baseUrl: "https://matrix.org",
+    accessToken: TOKEN,
+    userId: USER_ID,
+    deviceId: DEVICE_ID,
+});
+
+let call;
+
+function addListeners(call) {
+    call.on("hangup", () => {
+        console.log("Call ended");
+    });
+
+    call.on("error", (err) => {
+        console.error(err.message);
+        call.hangup();
+    });
+
+    call.on("feeds_changed", (feeds) => {
+        const localFeed  = feeds.find((feed) => feed.isLocal());
+        const remoteFeed = feeds.find((feed) => !feed.isLocal());
+
+        if (remoteFeed) {
+            remoteElement.srcObject = remoteFeed.stream;
+            remoteElement.play();
+        }
+        if (localFeed) {
+            localElement.muted = true;
+            localElement.srcObject = localFeed.stream;
+            localElement.play();
+        }
+    });
+}
+
+client.on("sync", (state) => {
+    if (state !== "PREPARED") return;
+
+    // Place a call
+    document.getElementById("call").onclick = () => {
+        call = matrixcs.createNewMatrixCall(client, ROOM_ID);
+        addListeners(call);
+        call.placeVideoCall();
+    };
+
+    // Handle incoming calls
+    client.on(CallEventHandlerEvent.Incoming, (c) => {
+        call = c;
+        addListeners(call);
+        call.answer();
+    });
+
+    document.getElementById("hangup").onclick = () => call.hangup();
+});
+
+client.startClient();
+```

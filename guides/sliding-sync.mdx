@@ -1,0 +1,275 @@
+---
+title: "Sliding Sync"
+description: "Faster, bandwidth-efficient sync using the Sliding Sync protocol (MSC4186)."
+---
+
+Sliding Sync is a major overhaul of the Matrix `/sync` endpoint designed to dramatically improve initial sync performance and reduce bandwidth. Instead of downloading every room's state up front, the client requests a **sliding window** of rooms it currently needs and lets the server send updates incrementally.
+
+<CardGroup cols={2}>
+  <Card title="Fast initial sync" icon="bolt">
+    Receive the first batch of rooms in milliseconds instead of waiting for the full room list.
+  </Card>
+  <Card title="Bandwidth efficient" icon="chart-line-down">
+    Only fetch rooms currently visible in the UI. Expand the window as the user scrolls.
+  </Card>
+  <Card title="Server-side filtering" icon="filter">
+    Filter by DM, encrypted, invited, space membership and more without client-side processing.
+  </Card>
+  <Card title="Extensible" icon="puzzle-piece">
+    First-class extension mechanism for E2EE device lists, account data, and push rules.
+  </Card>
+</CardGroup>
+
+## MSC4186 and server requirements
+
+Sliding Sync (also known as Simplified Sliding Sync, MSC4186) is an evolution of the earlier MSC3575 proxy-based approach. Key differences:
+
+| | MSC3575 (proxy) | MSC4186 (native) |
+|---|---|---|
+| Infrastructure | Separate proxy server | Native homeserver support |
+| Endpoint | Proxy URL | Homeserver URL |
+| Matrix version | Pre-1.4 homeservers | Matrix 1.4+ (Synapse 1.114+) |
+
+<Note>
+For homeservers that do not natively support MSC4186, the older MSC3575 proxy (`sliding-sync` sidecar) can be deployed alongside the homeserver.
+</Note>
+
+## Core classes
+
+### SlidingSync
+
+`SlidingSync` is the low-level class that manages the `/sync` HTTP loop, list subscriptions, room subscriptions and extensions. It has no direct dependency on the high-level SDK model layer.
+
+```typescript
+import {
+    SlidingSync,
+    SlidingSyncEvent,
+    SlidingSyncState,
+    type MSC3575List,
+    type MSC3575RoomSubscription,
+} from "matrix-js-sdk";
+```
+
+### SlidingSyncSdk
+
+`SlidingSyncSdk` bridges `SlidingSync` with the matrix-js-sdk model layer (rooms, room members, events). It implements the same `SyncApi` interface as the traditional sync implementation so the rest of the SDK does not need to know which sync method is in use.
+
+## Setting up Sliding Sync
+
+<Steps>
+
+### Create the SlidingSync instance
+
+```typescript
+import { SlidingSync } from "matrix-js-sdk";
+
+// Define which room state fields you always want
+const roomSubscriptionInfo: MSC3575RoomSubscription = {
+    required_state: [
+        ["m.room.name",         ""],
+        ["m.room.avatar",       ""],
+        ["m.room.encryption",   ""],
+        ["m.room.member",       "$ME"],  // only our own membership
+        ["m.room.create",       ""],
+    ],
+    timeline_limit: 20,
+};
+
+// Define the initial list of rooms to track
+const lists = new Map<string, MSC3575List>([
+    ["main", {
+        ranges: [[0, 19]],  // first 20 rooms (0-indexed)
+        sort: ["by_notification_level", "by_recency"],
+        timeline_limit: 1,
+        required_state: [
+            ["m.room.name", ""],
+            ["m.room.avatar", ""],
+        ],
+        filters: {},
+    }],
+]);
+
+const slidingSync = new SlidingSync(
+    "https://matrix.example.org", // proxyBaseUrl (or homeserver URL for MSC4186)
+    lists,
+    roomSubscriptionInfo,
+    client,
+    /*timeoutMS=*/ 30_000,
+);
+```
+
+### Create SlidingSyncSdk and attach it to the client
+
+```typescript
+import { SlidingSyncSdk } from "matrix-js-sdk/lib/sliding-sync-sdk";
+
+const slidingSyncSdk = new SlidingSyncSdk(
+    slidingSync,
+    client,
+    { initialSyncLimit: 1 }, // ClientOpts
+    {},                        // SyncApiOptions
+);
+
+// Start syncing
+await slidingSyncSdk.sync();
+```
+
+### Pass it to createClient
+
+Alternatively, pass a pre-built `SlidingSync` instance when creating the client:
+
+```typescript
+import { createClient } from "matrix-js-sdk";
+
+const client = createClient({
+    baseUrl: "https://matrix.example.org",
+    accessToken: myAccessToken,
+    userId: myUserId,
+    slidingSync, // pass the SlidingSync instance directly
+});
+
+await client.startClient();
+```
+
+</Steps>
+
+## Adjusting the room window
+
+As the user scrolls through their room list you can expand the sliding window:
+
+```typescript
+// Expand the main list to show rooms 0–49
+slidingSync.setListRanges("main", [[0, 49]]);
+
+// Add a second list for DMs only
+slidingSync.setList("dms", {
+    ranges: [[0, 9]],
+    sort: ["by_recency"],
+    filters: { is_dm: true },
+    timeline_limit: 5,
+    required_state: [["m.room.member", "$ME"]],
+});
+```
+
+## Subscribing to individual rooms
+
+Subscribe to a specific room (e.g. the currently open room) to receive full state and timeline updates:
+
+```typescript
+// Subscribe with the default roomSubscriptionInfo
+slidingSync.subscribeToRoom(roomId);
+
+// Add a custom, richer subscription for this room
+slidingSync.addCustomSubscription("active-room", {
+    required_state: [["*", "*"]], // all state events
+    timeline_limit: 100,
+});
+slidingSync.useCustomSubscription(roomId, "active-room");
+slidingSync.subscribeToRoom(roomId);
+
+// Unsubscribe when navigating away
+slidingSync.unsubscribeFromRoom(roomId);
+```
+
+## SlidingSyncEvent
+
+```typescript
+export enum SlidingSyncEvent {
+    /**
+     * Fires when updated data for a specific room arrives.
+     */
+    RoomData  = "SlidingSync.RoomData",
+    /**
+     * Fires at key points in the /sync lifecycle:
+     *   SlidingSyncState.RequestFinished — response received, before processing
+     *   SlidingSyncState.Complete        — response fully processed
+     */
+    Lifecycle = "SlidingSync.Lifecycle",
+}
+```
+
+Listening to lifecycle events:
+
+```typescript
+import { SlidingSyncEvent, SlidingSyncState } from "matrix-js-sdk";
+
+slidingSync.on(SlidingSyncEvent.Lifecycle, (state, response, err) => {
+    if (state === SlidingSyncState.RequestFinished) {
+        if (err) console.error("Sync request failed:", err);
+        else console.log("Sync request finished, processing...");
+    } else if (state === SlidingSyncState.Complete) {
+        console.log("Sync cycle complete");
+    }
+});
+
+slidingSync.on(SlidingSyncEvent.RoomData, (roomId, roomData) => {
+    console.log(`Room update for ${roomId}:`, roomData.name);
+});
+```
+
+## Filtering rooms
+
+The `MSC3575Filter` interface controls which rooms appear in a list. All fields are optional and additive:
+
+```typescript
+export interface MSC3575Filter {
+    is_dm?          : boolean;
+    is_encrypted?   : boolean;
+    is_invite?      : boolean;
+    room_name_like? : string;
+    room_types?     : string[];
+    not_room_types? : string[];
+    spaces?         : string[];
+    tags?           : string[];
+    not_tags?       : string[];
+}
+```
+
+Example — show only encrypted non-DM rooms:
+
+```typescript
+slidingSync.setList("encrypted-rooms", {
+    ranges: [[0, 19]],
+    sort: ["by_recency"],
+    filters: {
+        is_encrypted: true,
+        is_dm: false,
+    },
+    timeline_limit: 1,
+    required_state: [["m.room.name", ""]],
+});
+```
+
+## Extensions
+
+Sliding Sync supports extensions that piggyback on the same HTTP request. The E2EE extension is registered automatically by `SlidingSyncSdk` when Rust crypto is enabled. You can implement your own:
+
+```typescript
+import { type Extension, ExtensionState } from "matrix-js-sdk";
+
+class MyExtension implements Extension<{ enabled: boolean }, { data: string }> {
+    name() { return "my_extension"; }
+    when() { return ExtensionState.PostProcess; }
+
+    async onRequest(isInitial: boolean) {
+        return { enabled: true };
+    }
+
+    async onResponse(data: { data: string }) {
+        console.log("Extension response:", data.data);
+    }
+}
+
+slidingSync.registerExtension(new MyExtension());
+```
+
+## Comparison with traditional sync
+
+| | Traditional `/sync` | Sliding Sync |
+|---|---|---|
+| Initial sync time | Minutes for large accounts | Sub-second for first window |
+| Room state downloaded | All joined rooms | Only requested window |
+| Filtering | Client-side only | Server-side before transmission |
+| Hero computation | Client-side | Server-side (MSC4186) |
+| Pagination position | `next_batch` token | Numeric `pos` |
+| Extensions | No | Yes |

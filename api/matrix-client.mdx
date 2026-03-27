@@ -1,0 +1,840 @@
+---
+title: "MatrixClient"
+description: "The primary interface for interacting with a Matrix homeserver."
+---
+
+## Overview
+
+`MatrixClient` is the main class in matrix-js-sdk. It wraps the Matrix Client-Server API and provides a high-level interface for authentication, room operations, messaging, media handling, and real-time sync. It extends `TypedEventEmitter`, so you can listen for events using `.on()`, `.once()`, and `.off()`.
+
+You should not instantiate `MatrixClient` directly. Use [`createClient()`](/api/create-client) instead.
+
+```typescript
+import { createClient } from "matrix-js-sdk";
+
+const client = createClient({
+  baseUrl: "https://matrix.org",
+  accessToken: "syt_...",
+  userId: "@alice:matrix.org",
+});
+```
+
+---
+
+## Client Lifecycle
+
+### `startClient(opts?)`
+
+Start syncing with the homeserver. Must be called before most other methods will return live data.
+
+```typescript
+public async startClient(opts?: IStartClientOpts): Promise<void>
+```
+
+<ParamField body="opts" type="IStartClientOpts" optional>
+  Configuration for the sync loop.
+
+  <Expandable title="IStartClientOpts properties">
+    <ParamField body="initialSyncLimit" type="number" optional>
+      The `limit=` applied to the initial sync request. Default: `8`.
+    </ParamField>
+    <ParamField body="includeArchivedRooms" type="boolean" optional>
+      Include archived rooms in the initial sync. Default: `false`.
+    </ParamField>
+    <ParamField body="resolveInvitesToProfiles" type="boolean" optional>
+      Fetch profile info for unknown invite senders. Default: `false`.
+    </ParamField>
+    <ParamField body="pendingEventOrdering" type="PendingEventOrdering" optional>
+      Where pending (unsent) messages appear in a room timeline. One of `"chronological"` (default) or `"detached"`.
+    </ParamField>
+    <ParamField body="pollTimeout" type="number" optional>
+      Milliseconds to wait on `/sync`. Default: `30000`.
+    </ParamField>
+    <ParamField body="filter" type="Filter" optional>
+      A `Filter` object to apply to `/sync` calls.
+    </ParamField>
+    <ParamField body="disablePresence" type="boolean" optional>
+      Sync without automatically updating presence. Default: `false`.
+    </ParamField>
+    <ParamField body="lazyLoadMembers" type="boolean" optional>
+      Defer loading room membership events until needed. Default: `false`.
+    </ParamField>
+    <ParamField body="clientWellKnownPollPeriod" type="number" optional>
+      Seconds between polls to `/.well-known/matrix/client`. Default: `undefined` (disabled).
+    </ParamField>
+    <ParamField body="threadSupport" type="boolean" optional>
+      Organise events into threaded conversations when thread relations are found.
+    </ParamField>
+    <ParamField body="slidingSync" type="SlidingSync" optional>
+      **Experimental.** Use a sliding-sync connection instead of the classic `/sync` loop.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="Promise\<void\>" type="Promise">
+  Resolves once the sync loop has started.
+</ResponseField>
+
+```typescript
+await client.startClient({
+  initialSyncLimit: 20,
+  lazyLoadMembers: true,
+});
+```
+
+---
+
+### `stopClient()`
+
+Stop syncing and perform a clean shutdown of the client.
+
+```typescript
+public stopClient(): void
+```
+
+This cancels any in-flight sync requests, clears interval timers, and stops the crypto backend. Safe to call multiple times.
+
+```typescript
+client.stopClient();
+```
+
+---
+
+### `clearStores(args?)`
+
+Delete all data from the persistent stores used by this client. The client must **not** be running when this is called.
+
+```typescript
+public clearStores(
+  args: { cryptoDatabasePrefix?: string } = {}
+): Promise<void>
+```
+
+<ParamField body="args.cryptoDatabasePrefix" type="string" optional>
+  The IndexedDB database name prefix to clear. Defaults to `'matrix-js-sdk'`.
+</ParamField>
+
+<ResponseField name="Promise\<void\>" type="Promise">
+  Resolves when all stores have been cleared.
+</ResponseField>
+
+```typescript
+client.stopClient();
+await client.clearStores();
+```
+
+---
+
+## Room Operations
+
+### `createRoom(options)`
+
+Create a new Matrix room.
+
+```typescript
+public async createRoom(options: ICreateRoomOpts): Promise<{ room_id: string }>
+```
+
+<ParamField body="options" type="ICreateRoomOpts" required>
+  Room creation options passed directly to the `/createRoom` API. Common fields include `name`, `topic`, `visibility` (`"public"` | `"private"`), `preset`, and `invite`.
+</ParamField>
+
+<ResponseField name="room_id" type="string">
+  The ID of the newly created room.
+</ResponseField>
+
+```typescript
+const { room_id } = await client.createRoom({
+  name: "My Room",
+  topic: "A test room",
+  visibility: "private",
+  preset: "private_chat",
+});
+```
+
+---
+
+### `joinRoom(roomIdOrAlias, opts?)`
+
+Join a room by its ID or alias. No-ops if already joined.
+
+```typescript
+public async joinRoom(
+  roomIdOrAlias: string,
+  opts: IJoinRoomOpts = {}
+): Promise<Room>
+```
+
+<ParamField body="roomIdOrAlias" type="string" required>
+  The room ID (`!abc:example.com`) or alias (`#general:example.com`) to join.
+</ParamField>
+
+<ParamField body="opts" type="IJoinRoomOpts" optional>
+  Optional join parameters, such as `viaServers` (array of server names to route the request through).
+</ParamField>
+
+<ResponseField name="Room" type="Room">
+  The `Room` object for the joined room.
+</ResponseField>
+
+```typescript
+const room = await client.joinRoom("#general:matrix.org", {
+  viaServers: ["matrix.org"],
+});
+```
+
+---
+
+### `leave(roomId)`
+
+Leave a room.
+
+```typescript
+public leave(roomId: string): Promise<EmptyObject>
+```
+
+<ParamField body="roomId" type="string" required>
+  The ID of the room to leave.
+</ParamField>
+
+<ResponseField name="Promise\<EmptyObject\>" type="Promise">
+  Resolves to an empty object on success.
+</ResponseField>
+
+```typescript
+await client.leave("!abc123:matrix.org");
+```
+
+---
+
+### `getRoom(roomId)`
+
+Retrieve a room from the local store.
+
+```typescript
+public getRoom(roomId: string | undefined): Room | null
+```
+
+<ParamField body="roomId" type="string" required>
+  The ID of the room to retrieve.
+</ParamField>
+
+<ResponseField name="Room | null" type="Room | null">
+  The `Room` object if found, or `null` if not in the store.
+</ResponseField>
+
+```typescript
+const room = client.getRoom("!abc123:matrix.org");
+if (room) {
+  console.log(room.name);
+}
+```
+
+---
+
+### `getRooms()`
+
+Retrieve all rooms from the local store.
+
+```typescript
+public getRooms(): Room[]
+```
+
+<ResponseField name="Room[]" type="Room[]">
+  All rooms currently in the store, or an empty array if there is no store.
+</ResponseField>
+
+```typescript
+const rooms = client.getRooms();
+rooms.forEach((room) => console.log(room.roomId, room.name));
+```
+
+---
+
+### `publicRooms(options?)`
+
+Query the homeserver's public room directory.
+
+```typescript
+public publicRooms(
+  options: IRoomDirectoryOptions = {}
+): Promise<IPublicRoomsResponse>
+```
+
+<ParamField body="options" type="IRoomDirectoryOptions" optional>
+  Filtering options. Includes `server`, `limit`, `since`, and filter fields like `generic_search_term`.
+</ParamField>
+
+<ResponseField name="IPublicRoomsResponse" type="object">
+  Contains `chunk` (array of public room summaries), `next_batch`, and `prev_batch`.
+</ResponseField>
+
+```typescript
+const { chunk } = await client.publicRooms({ limit: 20 });
+chunk.forEach((room) => console.log(room.room_id, room.name));
+```
+
+---
+
+## Messaging
+
+### `sendEvent(roomId, eventType, content, txnId?)`
+
+Send a Matrix timeline event to a room.
+
+```typescript
+public sendEvent<K extends keyof TimelineEvents>(
+  roomId: string,
+  eventType: K,
+  content: TimelineEvents[K],
+  txnId?: string,
+): Promise<ISendEventResponse>
+
+// Thread-scoped variant:
+public sendEvent<K extends keyof TimelineEvents>(
+  roomId: string,
+  threadId: string | null,
+  eventType: K,
+  content: TimelineEvents[K],
+  txnId?: string,
+): Promise<ISendEventResponse>
+```
+
+<ParamField body="roomId" type="string" required>
+  The ID of the room to send the event to.
+</ParamField>
+<ParamField body="threadId" type="string | null" optional>
+  The event ID of the thread root. Pass `null` for the main timeline.
+</ParamField>
+<ParamField body="eventType" type="string" required>
+  The Matrix event type, e.g. `"m.room.message"`.
+</ParamField>
+<ParamField body="content" type="IContent" required>
+  The event content object.
+</ParamField>
+<ParamField body="txnId" type="string" optional>
+  Optional transaction ID to deduplicate repeated attempts.
+</ParamField>
+
+<ResponseField name="event_id" type="string">
+  The ID assigned to the sent event by the homeserver.
+</ResponseField>
+
+```typescript
+const { event_id } = await client.sendEvent(
+  "!abc123:matrix.org",
+  "m.room.message",
+  { msgtype: "m.text", body: "Hello!" },
+);
+```
+
+---
+
+### `sendMessage(roomId, content, txnId?)`
+
+Send an `m.room.message` event.
+
+```typescript
+public sendMessage(
+  roomId: string,
+  content: RoomMessageEventContent,
+  txnId?: string,
+): Promise<ISendEventResponse>
+
+// Thread-scoped variant:
+public sendMessage(
+  roomId: string,
+  threadId: string | null,
+  content: RoomMessageEventContent,
+  txnId?: string,
+): Promise<ISendEventResponse>
+```
+
+```typescript
+await client.sendMessage("!abc123:matrix.org", {
+  msgtype: "m.text",
+  body: "Hello from the SDK!",
+});
+```
+
+---
+
+### `sendTextMessage(roomId, body, txnId?)`
+
+Convenience wrapper around `sendMessage` for plain-text messages.
+
+```typescript
+public sendTextMessage(
+  roomId: string,
+  body: string,
+  txnId?: string,
+): Promise<ISendEventResponse>
+
+// Thread-scoped variant:
+public sendTextMessage(
+  roomId: string,
+  threadId: string | null,
+  body: string,
+  txnId?: string,
+): Promise<ISendEventResponse>
+```
+
+<ParamField body="roomId" type="string" required>
+  The room to send the message to.
+</ParamField>
+<ParamField body="body" type="string" required>
+  The plain-text message body.
+</ParamField>
+<ParamField body="txnId" type="string" optional>
+  Optional transaction ID.
+</ParamField>
+
+```typescript
+await client.sendTextMessage("!abc123:matrix.org", "Hello, Matrix!");
+```
+
+---
+
+### `redactEvent(roomId, eventId, txnId?, opts?)`
+
+Redact (soft-delete) an event in a room.
+
+```typescript
+public redactEvent(
+  roomId: string,
+  eventId: string,
+  txnId?: string,
+  opts?: IRedactOpts,
+): Promise<ISendEventResponse>
+
+// Thread-scoped variant:
+public redactEvent(
+  roomId: string,
+  threadId: string | null,
+  eventId: string,
+  txnId?: string,
+  opts?: IRedactOpts,
+): Promise<ISendEventResponse>
+```
+
+<ParamField body="roomId" type="string" required>
+  The ID of the room containing the event.
+</ParamField>
+<ParamField body="eventId" type="string" required>
+  The ID of the event to redact.
+</ParamField>
+<ParamField body="opts.reason" type="string" optional>
+  A human-readable reason for the redaction.
+</ParamField>
+
+```typescript
+await client.redactEvent("!abc123:matrix.org", "$eventId", undefined, {
+  reason: "Spam",
+});
+```
+
+---
+
+## Membership
+
+### `invite(roomId, userId, opts?)`
+
+Invite a user to a room.
+
+```typescript
+public async invite(
+  roomId: string,
+  userId: string,
+  opts: InviteOpts | string = {}
+): Promise<EmptyObject>
+```
+
+<ParamField body="roomId" type="string" required>
+  The room to invite the user to.
+</ParamField>
+<ParamField body="userId" type="string" required>
+  The MXID of the user to invite.
+</ParamField>
+<ParamField body="opts" type="InviteOpts | string" optional>
+  Options, or a plain string treated as a `reason`. `opts.shareEncryptedHistory` will share room key history if the room's visibility allows it.
+</ParamField>
+
+```typescript
+await client.invite("!abc123:matrix.org", "@bob:matrix.org");
+```
+
+---
+
+### `kick(roomId, userId, reason?)`
+
+Kick a user from a room.
+
+```typescript
+public kick(
+  roomId: string,
+  userId: string,
+  reason?: string,
+): Promise<EmptyObject>
+```
+
+```typescript
+await client.kick("!abc123:matrix.org", "@bob:matrix.org", "Disruptive behaviour");
+```
+
+---
+
+### `ban(roomId, userId, reason?)`
+
+Ban a user from a room.
+
+```typescript
+public ban(
+  roomId: string,
+  userId: string,
+  reason?: string,
+): Promise<EmptyObject>
+```
+
+```typescript
+await client.ban("!abc123:matrix.org", "@bob:matrix.org");
+```
+
+---
+
+### `unban(roomId, userId)`
+
+Lift a ban from a user in a room.
+
+```typescript
+public unban(roomId: string, userId: string): Promise<EmptyObject>
+```
+
+```typescript
+await client.unban("!abc123:matrix.org", "@bob:matrix.org");
+```
+
+---
+
+## User Profile
+
+### `setDisplayName(name)`
+
+Set the display name of the logged-in user.
+
+```typescript
+public async setDisplayName(name: string): Promise<EmptyObject>
+```
+
+```typescript
+await client.setDisplayName("Alice");
+```
+
+---
+
+### `setAvatarUrl(url)`
+
+Set the avatar URL of the logged-in user.
+
+```typescript
+public async setAvatarUrl(url: string): Promise<EmptyObject>
+```
+
+<ParamField body="url" type="string" required>
+  An MXC URL pointing to the avatar image (obtained via `uploadContent`).
+</ParamField>
+
+```typescript
+const { content_uri } = await client.uploadContent(file);
+await client.setAvatarUrl(content_uri);
+```
+
+---
+
+### `getProfileInfo(userId, info?)`
+
+Fetch profile information for any user.
+
+```typescript
+public getProfileInfo(
+  userId: string,
+  info?: string,
+): Promise<{ avatar_url?: string; displayname?: string }>
+```
+
+<ParamField body="userId" type="string" required>
+  The MXID of the user whose profile to fetch.
+</ParamField>
+<ParamField body="info" type="string" optional>
+  Retrieve a specific field only: `"displayname"` or `"avatar_url"`.
+</ParamField>
+
+```typescript
+const profile = await client.getProfileInfo("@alice:matrix.org");
+console.log(profile.displayname, profile.avatar_url);
+```
+
+---
+
+## Presence
+
+### `setPresence(opts)`
+
+Set the presence status of the logged-in user via the Presence API.
+
+```typescript
+public async setPresence(opts: IPresenceOpts): Promise<void>
+```
+
+<ParamField body="opts.presence" type="string" required>
+  One of `"online"`, `"offline"`, or `"unavailable"`.
+</ParamField>
+<ParamField body="opts.status_msg" type="string" optional>
+  A human-readable status message.
+</ParamField>
+
+```typescript
+await client.setPresence({ presence: "online", status_msg: "Available" });
+```
+
+---
+
+## Account Data
+
+### `setAccountData(eventType, content)`
+
+Set user-scoped account data and wait for the echo to be received over `/sync`.
+
+```typescript
+public async setAccountData<K extends keyof WritableAccountDataEvents>(
+  eventType: K,
+  content: AccountDataEvents[K] | Record<string, never>,
+): Promise<EmptyObject>
+```
+
+<ParamField body="eventType" type="string" required>
+  The account data event type, e.g. `"m.direct"`.
+</ParamField>
+<ParamField body="content" type="object" required>
+  The content to store.
+</ParamField>
+
+```typescript
+await client.setAccountData("m.direct", {
+  "@bob:matrix.org": ["!abc123:matrix.org"],
+});
+```
+
+---
+
+### `getAccountData(eventType)`
+
+Read a user-scoped account data event from the local store.
+
+```typescript
+public getAccountData<K extends keyof AccountDataEvents>(
+  eventType: K,
+): MatrixEvent | undefined
+```
+
+```typescript
+const event = client.getAccountData("m.direct");
+const dmMap = event?.getContent();
+```
+
+---
+
+## Media
+
+### `uploadContent(file, opts?)`
+
+Upload a file to the homeserver's media repository.
+
+```typescript
+public uploadContent(
+  file: FileType,
+  opts?: UploadOpts,
+): Promise<UploadResponse>
+```
+
+<ParamField body="file" type="FileType" required>
+  In browsers, a `File` or `Blob`. In Node.js, a `Buffer`, `string`, or `ReadStream`.
+</ParamField>
+<ParamField body="opts" type="UploadOpts" optional>
+  Upload options. Includes `name` (filename), `type` (MIME type), `progressHandler`, and `includeFilename`.
+</ParamField>
+
+<ResponseField name="content_uri" type="string">
+  The MXC URI of the uploaded content, e.g. `mxc://matrix.org/abc123`.
+</ResponseField>
+
+```typescript
+const { content_uri } = await client.uploadContent(fileBlob, {
+  name: "photo.jpg",
+  type: "image/jpeg",
+});
+```
+
+---
+
+### `mxcUrlToHttp(mxcUrl, width?, height?, resizeMethod?, ...)`
+
+Convert an MXC URI to an HTTP URL.
+
+```typescript
+public mxcUrlToHttp(
+  mxcUrl: string,
+  width?: number,
+  height?: number,
+  resizeMethod?: string,
+  allowDirectLinks?: boolean,
+  allowRedirects?: boolean,
+  useAuthentication?: boolean,
+): string | null
+```
+
+<ParamField body="mxcUrl" type="string" required>
+  The `mxc://` URI to convert.
+</ParamField>
+<ParamField body="width" type="number" optional>
+  Desired thumbnail width in pixels.
+</ParamField>
+<ParamField body="height" type="number" optional>
+  Desired thumbnail height in pixels.
+</ParamField>
+<ParamField body="resizeMethod" type="string" optional>
+  Thumbnail resize method: `"crop"` or `"scale"`.
+</ParamField>
+<ParamField body="allowDirectLinks" type="boolean" optional>
+  If `true`, return non-MXC URLs as-is. This may leak information. Default: `false`.
+</ParamField>
+<ParamField body="allowRedirects" type="boolean" optional>
+  If `true`, the caller accepts 307/308 redirects. Default: `false`.
+</ParamField>
+<ParamField body="useAuthentication" type="boolean" optional>
+  If `true`, return an authenticated media URL. Implies `allowRedirects`. Default: `false`.
+</ParamField>
+
+<ResponseField name="string | null" type="string | null">
+  The HTTP URL, or `null` if the MXC URL is invalid.
+</ResponseField>
+
+```typescript
+const url = client.mxcUrlToHttp(
+  "mxc://matrix.org/abc123",
+  96,   // width
+  96,   // height
+  "crop",
+);
+```
+
+---
+
+## Authentication
+
+### `login(loginType, data)`
+
+Post a login request. Updates the client with returned credentials.
+
+```typescript
+public login(
+  loginType: LoginRequest["type"],
+  data: Omit<LoginRequest, "type">,
+): Promise<LoginResponse>
+```
+
+<Warning>
+  This method is deprecated. It mutates the `MatrixClient` instance inconsistently. Prefer calling `loginRequest()` and constructing a new `MatrixClient` with the returned credentials. See [matrix-org/matrix-js-sdk#4502](https://github.com/matrix-org/matrix-js-sdk/issues/4502).
+</Warning>
+
+<ParamField body="loginType" type="string" required>
+  The login flow type, e.g. `"m.login.password"` or `"m.login.token"`.
+</ParamField>
+<ParamField body="data" type="object" required>
+  Flow-specific credentials, e.g. `{ user, password }` for `m.login.password`.
+</ParamField>
+
+---
+
+### `logout(stopClient?)`
+
+Post a logout request to the homeserver, invalidating the current access token.
+
+```typescript
+public async logout(stopClient?: boolean): Promise<EmptyObject>
+```
+
+<ParamField body="stopClient" type="boolean" optional>
+  If `true`, also call `stopClient()` and abort all pending HTTP requests before logging out. Default: `false`.
+</ParamField>
+
+```typescript
+await client.logout(true);
+```
+
+---
+
+### `getAccessToken()`
+
+Return the current access token.
+
+```typescript
+public getAccessToken(): string | null
+```
+
+---
+
+### `getUserId()`
+
+Return the MXID of the logged-in user.
+
+```typescript
+public getUserId(): string | null
+```
+
+---
+
+### `getDeviceId()`
+
+Return the device ID of this client.
+
+```typescript
+public getDeviceId(): string | null
+```
+
+---
+
+## Server Info
+
+### `getVersions()`
+
+Query the server's supported spec versions. Results are cached.
+
+```typescript
+public async getVersions(): Promise<IServerVersions>
+```
+
+<ResponseField name="versions" type="string[]">
+  Array of supported Matrix spec versions, e.g. `["v1.6", "v1.7"]`.
+</ResponseField>
+<ResponseField name="unstable_features" type="Record<string, boolean>">
+  Map of unstable feature flags.
+</ResponseField>
+
+---
+
+### `getCapabilities()`
+
+Query the homeserver's capabilities (e.g. supported room versions, password change support).
+
+```typescript
+public async getCapabilities(): Promise<Capabilities>
+```
+
+<ResponseField name="Capabilities" type="object">
+  An object describing server capabilities. See `Capabilities` in `serverCapabilities.ts`.
+</ResponseField>
+
+```typescript
+const caps = await client.getCapabilities();
+console.log(caps["m.room_versions"]);
+```

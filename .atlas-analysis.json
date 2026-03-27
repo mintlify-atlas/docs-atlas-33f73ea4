@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Matrix JavaScript SDK",
+  "projectType": "sdk-library",
+  "projectName": "Matrix JavaScript SDK",
+  "projectDescription": "A TypeScript/JavaScript SDK for building Matrix protocol clients, supporting real-time messaging, end-to-end encryption, VoIP calling, and room management in both browser and Node.js environments.",
   "theme": "luma",
-  "colors": {
-    "primary": "#0DBD8B",
-    "light": "#E8FBF5",
-    "dark": "#0A8F68"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/matrix-org/matrix-js-sdk"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/matrix-org/matrix-js-sdk"
-    }
-  },
+  "primaryColor": "#0DBD8B",
+  "lightColor": "#E8FBF5",
+  "darkColor": "#0A8F68",
   "navigation": {
     "tabs": [
       {
@@ -97,5 +85,42 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Full Matrix Client-Server API implementation",
+    "End-to-end encryption via Rust WebAssembly crypto stack",
+    "Real-time sync with /sync and Sliding Sync support",
+    "VoIP calling (1:1 and group calls via MatrixRTC/LiveKit)",
+    "Cross-signing and device verification",
+    "Key backup and secret storage",
+    "OIDC authentication support",
+    "Works in both browser and Node.js environments",
+    "Event-driven architecture with TypedEventEmitter",
+    "IndexedDB and in-memory storage backends"
+  ],
+  "publicApiSurface": [
+    "createClient(opts: ICreateClientOpts): MatrixClient",
+    "createRoomWidgetClient(widgetApi, capabilities, roomId, opts): MatrixClient",
+    "MatrixClient.startClient(opts?)",
+    "MatrixClient.stopClient()",
+    "MatrixClient.initRustCrypto()",
+    "MatrixClient.getCrypto(): CryptoApi",
+    "MatrixClient.sendEvent(roomId, type, content)",
+    "MatrixClient.sendMessage(roomId, content)",
+    "MatrixClient.joinRoom(roomId)",
+    "MatrixClient.createRoom(opts)",
+    "MatrixClient.getRoom(roomId): Room",
+    "MatrixClient.on(event, listener)",
+    "CryptoApi.bootstrapSecretStorage(opts)",
+    "CryptoApi.bootstrapCrossSigning(opts)",
+    "CryptoApi.resetKeyBackup()",
+    "CryptoApi.requestOwnUserVerification(): VerificationRequest",
+    "Room",
+    "RoomMember",
+    "MatrixEvent",
+    "EventTimeline",
+    "Thread",
+    "User",
+    "AutoDiscovery.findClientConfig(domain)"
+  ]
 }

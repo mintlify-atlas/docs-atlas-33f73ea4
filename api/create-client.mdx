@@ -1,0 +1,368 @@
+---
+title: "createClient()"
+description: "Factory function for constructing a fully configured MatrixClient."
+---
+
+## Overview
+
+`createClient` is the recommended entry point for instantiating a `MatrixClient`. Unlike calling `new MatrixClient()` directly, it automatically provisions default implementations for the `store`, `scheduler`, and `cryptoStore` dependencies when they are not supplied.
+
+```typescript
+import { createClient } from "matrix-js-sdk";
+
+const client = createClient(opts: ICreateClientOpts): MatrixClient;
+```
+
+**Source:** `src/matrix.ts:148`
+
+---
+
+## Function Signature
+
+```typescript
+export function createClient(opts: ICreateClientOpts): MatrixClient
+```
+
+<ParamField body="opts" type="ICreateClientOpts" required>
+  Configuration options. All properties of `ICreateClientOpts` are passed directly to the `MatrixClient` constructor.
+</ParamField>
+
+<ResponseField name="MatrixClient" type="MatrixClient">
+  A new, fully configured `MatrixClient` instance. Call `startClient()` to begin syncing.
+</ResponseField>
+
+---
+
+## `ICreateClientOpts` Reference
+
+### Connection
+
+<ParamField body="baseUrl" type="string" required>
+  The base URL of the homeserver, e.g. `"https://matrix.org"`. Must not have a trailing slash.
+</ParamField>
+
+<ParamField body="idBaseUrl" type="string" optional>
+  The base URL of the identity server, e.g. `"https://vector.im"`.
+</ParamField>
+
+<ParamField body="fetchFn" type="typeof globalThis.fetch" optional>
+  A custom `fetch` implementation. Falls back to the global `fetch` if not provided.
+</ParamField>
+
+<ParamField body="localTimeoutMs" type="number" optional>
+  Default maximum time in milliseconds to wait before timing out HTTP requests. No timeout by default.
+</ParamField>
+
+<ParamField body="useAuthorizationHeader" type="boolean" optional>
+  Send the access token as an `Authorization: Bearer` header rather than a query parameter. Default: `true`. Note: query-parameter access tokens are deprecated as of Matrix spec v1.11.
+</ParamField>
+
+<ParamField body="queryParams" type="QueryDict" optional>
+  Extra query parameters appended to all requests. Useful for application services that require `?user_id=`.
+</ParamField>
+
+---
+
+### Authentication
+
+<ParamField body="accessToken" type="string" optional>
+  The access token for the user's session. Required for most API calls.
+</ParamField>
+
+<ParamField body="refreshToken" type="string" optional>
+  An OIDC refresh token, if applicable. Used by `tokenRefreshFunction` to renew `accessToken`.
+</ParamField>
+
+<ParamField body="tokenRefreshFunction" type="TokenRefreshFunction" optional>
+  A callback invoked by the HTTP layer when a potentially expired token is encountered and a `refreshToken` is available.
+</ParamField>
+
+<ParamField body="userId" type="string" optional>
+  The MXID of the logged-in user, e.g. `"@alice:matrix.org"`. Required for most authenticated operations.
+</ParamField>
+
+<ParamField body="deviceId" type="string" optional>
+  A unique identifier for this device. Required to enable end-to-end encryption. Must be consistent across sessions for the same device.
+</ParamField>
+
+---
+
+### Storage
+
+<ParamField body="store" type="Store" optional>
+  The sync data store. If not specified, `createClient` provisions a `MemoryStore` (with `localStorage` in browsers). To persist data across sessions use `IndexedDBStore`.
+</ParamField>
+
+<ParamField body="cryptoStore" type="CryptoStore" optional>
+  A store for end-to-end crypto session data. `createClient` uses the factory registered via `setCryptoStoreFactory()`, or a `MemoryCryptoStore` if no factory is set. Required when migrating a device from legacy crypto to Rust crypto.
+</ParamField>
+
+<ParamField body="pickleKey" type="string" optional>
+  An encryption key used to protect sensitive data (e.g. E2EE keys) in the `cryptoStore`. Must be the same value every time the client is initialised for the same device. Only used by the legacy crypto implementation.
+</ParamField>
+
+---
+
+### Scheduling
+
+<ParamField body="scheduler" type="MatrixScheduler" optional>
+  The event scheduler. If not specified, `createClient` creates a default `MatrixScheduler`. Without a scheduler, failed requests will not be retried.
+</ParamField>
+
+---
+
+### Cryptography
+
+<ParamField body="cryptoCallbacks" type="CryptoCallbacks" optional>
+  Application-provided callbacks for cryptographic operations, such as prompting the user for cross-signing keys or secret storage passphrases.
+</ParamField>
+
+<ParamField body="verificationMethods" type="string[]" optional>
+  The interactive verification methods to offer when verifying another device. If unset, all known methods (QR code display, QR code scan, SAS/emojis) are offered.
+</ParamField>
+
+<ParamField body="enableEncryptedStateEvents" type="boolean" optional>
+  Enable encrypted state events (experimental).
+</ParamField>
+
+---
+
+### Identity Server
+
+<ParamField body="identityServer" type="IIdentityServerProvider" optional>
+  A provider object with a `getAccessToken()` method. Used to authenticate calls to the identity server without manually managing identity server access tokens.
+</ParamField>
+
+---
+
+### Timeline
+
+<ParamField body="timelineSupport" type="boolean" optional>
+  Enable improved timeline support, required for `getEventTimeline()`. Disabled by default for compatibility with older clients. Set to `true` for modern applications.
+</ParamField>
+
+---
+
+### Room Display
+
+<ParamField body="roomNameGenerator" type="(roomId: string, state: RoomNameState) => string | null" optional>
+  A callback to generate room names for empty or membership-derived room names. Defaults to a built-in English handler with basic pluralisation.
+</ParamField>
+
+---
+
+### VoIP / Group Calls
+
+<ParamField body="forceTURN" type="boolean" optional>
+  Force all WebRTC calls to relay through a TURN server. Default: `false`.
+</ParamField>
+
+<ParamField body="iceCandidatePoolSize" type="number" optional>
+  Number of ICE candidates to gather on incoming call before signalling begins. Default: `0`.
+</ParamField>
+
+<ParamField body="supportsCallTransfer" type="boolean" optional>
+  Advertise support for call transfers. Default: `false`.
+</ParamField>
+
+<ParamField body="fallbackICEServerAllowed" type="boolean" optional>
+  Allow a fallback ICE server when the homeserver provides none. Default: `false`.
+</ParamField>
+
+<ParamField body="useE2eForGroupCall" type="boolean" optional>
+  Encrypt to-device signalling for group calls with Olm. Default: `true`.
+</ParamField>
+
+<ParamField body="useLivekitForGroupCalls" type="boolean" optional>
+  Use LiveKit media at the application layer instead of the built-in WebRTC stack. Group calls will only create signalling events.
+</ParamField>
+
+<ParamField body="isVoipWithNoMediaAllowed" type="boolean" optional>
+  Allow joining group calls without an active media stream. Default: `false`.
+</ParamField>
+
+<ParamField body="disableVoip" type="boolean" optional>
+  Disable VoIP support entirely (prevents fetching TURN servers, etc.). Default: `false`.
+</ParamField>
+
+---
+
+### Logging
+
+<ParamField body="logger" type="Logger" optional>
+  A custom logger for this `MatrixClient` instance. Defaults to the global logger. Use `DebugLogger` for verbose output.
+</ParamField>
+
+---
+
+## Usage Examples
+
+<Tabs>
+  <Tab title="Minimal (TypeScript)">
+    ```typescript
+    import { createClient } from "matrix-js-sdk";
+
+    const client = createClient({
+      baseUrl: "https://matrix.org",
+      accessToken: "syt_...",
+      userId: "@alice:matrix.org",
+    });
+
+    await client.startClient();
+    ```
+  </Tab>
+  <Tab title="Minimal (JavaScript)">
+    ```javascript
+    const { createClient } = require("matrix-js-sdk");
+
+    const client = createClient({
+      baseUrl: "https://matrix.org",
+      accessToken: "syt_...",
+      userId: "@alice:matrix.org",
+    });
+
+    await client.startClient();
+    ```
+  </Tab>
+</Tabs>
+
+### With a persistent store
+
+<Tabs>
+  <Tab title="TypeScript">
+    ```typescript
+    import { createClient, IndexedDBStore } from "matrix-js-sdk";
+
+    const store = new IndexedDBStore({
+      indexedDB: globalThis.indexedDB,
+      dbName: "my-app-matrix",
+      localStorage: globalThis.localStorage,
+    });
+    await store.startup();
+
+    const client = createClient({
+      baseUrl: "https://matrix.org",
+      accessToken: "syt_...",
+      userId: "@alice:matrix.org",
+      deviceId: "ABCDEFGH",
+      store,
+    });
+
+    await client.startClient({ lazyLoadMembers: true });
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const { createClient, IndexedDBStore } = require("matrix-js-sdk");
+
+    const store = new IndexedDBStore({
+      indexedDB: globalThis.indexedDB,
+      dbName: "my-app-matrix",
+      localStorage: globalThis.localStorage,
+    });
+    await store.startup();
+
+    const client = createClient({
+      baseUrl: "https://matrix.org",
+      accessToken: "syt_...",
+      userId: "@alice:matrix.org",
+      deviceId: "ABCDEFGH",
+      store,
+    });
+
+    await client.startClient({ lazyLoadMembers: true });
+    ```
+  </Tab>
+</Tabs>
+
+### With Rust Crypto (E2EE)
+
+<Tabs>
+  <Tab title="TypeScript">
+    ```typescript
+    import { createClient } from "matrix-js-sdk";
+
+    const client = createClient({
+      baseUrl: "https://matrix.org",
+      accessToken: "syt_...",
+      userId: "@alice:matrix.org",
+      deviceId: "MYDEVICEID",
+    });
+
+    // Initialise the Rust crypto backend before starting sync
+    await client.initRustCrypto();
+    await client.startClient();
+    ```
+  </Tab>
+  <Tab title="JavaScript">
+    ```javascript
+    const { createClient } = require("matrix-js-sdk");
+
+    const client = createClient({
+      baseUrl: "https://matrix.org",
+      accessToken: "syt_...",
+      userId: "@alice:matrix.org",
+      deviceId: "MYDEVICEID",
+    });
+
+    await client.initRustCrypto();
+    await client.startClient();
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `createRoomWidgetClient()`
+
+Construct a `MatrixClient` that operates inside a Matrix widget. This client communicates with the host client via the [Matrix Widget API](https://github.com/matrix-org/matrix-widget-api) rather than directly with a homeserver, and therefore has a restricted feature set.
+
+```typescript
+export function createRoomWidgetClient(
+  widgetApi: WidgetApi,
+  capabilities: ICapabilities,
+  roomId: string,
+  opts: ICreateClientOpts,
+  sendContentLoaded?: boolean,
+): MatrixClient
+```
+
+**Source:** `src/matrix.ts:166`
+
+<ParamField body="widgetApi" type="WidgetApi" required>
+  The `WidgetApi` instance from `matrix-widget-api` used for communication between the widget and the host client.
+</ParamField>
+
+<ParamField body="capabilities" type="ICapabilities" required>
+  The capabilities the widget client will request from the host client.
+</ParamField>
+
+<ParamField body="roomId" type="string" required>
+  The ID of the room the widget is associated with.
+</ParamField>
+
+<ParamField body="opts" type="ICreateClientOpts" required>
+  Standard client options (at minimum `baseUrl`).
+</ParamField>
+
+<ParamField body="sendContentLoaded" type="boolean" optional>
+  Whether to send a `ContentLoaded` widget action immediately after setup. Set to `false` if `waitForIFrameLoad=true` is used, or if the widget wants to send `ContentLoaded` at a later time. Default: `true`.
+</ParamField>
+
+<ResponseField name="MatrixClient" type="MatrixClient">
+  A `RoomWidgetClient` instance (subclass of `MatrixClient`) with restricted capabilities.
+</ResponseField>
+
+```typescript
+import { createRoomWidgetClient } from "matrix-js-sdk";
+import { WidgetApi } from "matrix-widget-api";
+
+const widgetApi = new WidgetApi();
+
+const client = createRoomWidgetClient(
+  widgetApi,
+  { sendEvent: ["m.room.message"], receiveEvent: ["m.room.message"] },
+  "!abc123:matrix.org",
+  { baseUrl: "https://matrix.org" },
+);
+```

@@ -1,0 +1,237 @@
+---
+title: "Media"
+description: "Upload and download media, handle MXC URIs, and use authenticated media (MSC3916 / Matrix 1.11)."
+---
+
+Matrix stores all media — images, videos, files, avatars — on the homeserver's media repository. Each uploaded file is assigned an `mxc://` URI that clients use to reference it. The SDK provides helpers to upload content and convert MXC URIs to HTTP download URLs.
+
+## Uploading media
+
+Use `client.uploadContent()` to upload a file to the homeserver:
+
+```typescript
+// Upload a File or Blob
+const response = await client.uploadContent(file, {
+    type: "image/png",           // optional MIME type override
+    name: "screenshot.png",      // optional filename
+    progressHandler: ({ loaded, total }) => {
+        console.log(`Upload: ${Math.round((loaded / total) * 100)}%`);
+    },
+});
+
+const mxcUri = response.content_uri;
+// e.g. "mxc://example.org/abcdef1234"
+```
+
+You can then include `mxcUri` in a message event:
+
+```typescript
+await client.sendMessage(roomId, {
+    msgtype: "m.image",
+    url: mxcUri,
+    body: "screenshot.png",
+    info: {
+        mimetype: "image/png",
+        size: file.size,
+        w: 1920,
+        h: 1080,
+    },
+});
+```
+
+## Converting MXC URIs to HTTP URLs
+
+Use `client.mxcUrlToHttp()` to convert an `mxc://` URI to a usable HTTP URL:
+
+```typescript
+const httpUrl = client.mxcUrlToHttp(
+    "mxc://example.org/abc123",
+);
+// → "https://matrix.example.org/_matrix/media/v3/download/example.org/abc123"
+```
+
+### Thumbnail URLs
+
+Pass `width`, `height`, and an optional `resizeMethod` to request a server-generated thumbnail:
+
+```typescript
+const thumbnailUrl = client.mxcUrlToHttp(
+    mxcUri,
+    /*width=*/  800,
+    /*height=*/ 600,
+    /*resizeMethod=*/ "scale", // "scale" or "crop"
+);
+```
+
+The underlying `getHttpUriForMxc()` function shows how the URL is constructed:
+
+```typescript
+// From src/content-repo.ts
+export function getHttpUriForMxc(
+    baseUrl: string,
+    mxc?: string,
+    width?: number,
+    height?: number,
+    resizeMethod?: string,
+    allowDirectLinks = false,
+    allowRedirects?: boolean,
+    useAuthentication?: boolean,
+    animated?: boolean,
+): string
+```
+
+- If `width`, `height`, or `resizeMethod` are set the URL points to `/_matrix/media/v3/thumbnail/...`.
+- Otherwise the URL points to `/_matrix/media/v3/download/...`.
+- When `useAuthentication` is `true` the URL uses the authenticated endpoint `/_matrix/client/v1/media/...` and `allowRedirects` is automatically set to `true` (required by MSC3916).
+
+## Authenticated media (MSC3916 / Matrix 1.11)
+
+Matrix 1.11 introduced MSC3916, which requires clients to supply an `Authorization` header when accessing media. Servers that have enabled this feature will reject unauthenticated media requests.
+
+<Warning>
+In a future version of the SDK, `mxcUrlToHttp()` will return **only** authenticated URLs. You should migrate to authenticated media now to avoid breakage.
+</Warning>
+
+### Generating an authenticated URL
+
+Set `useAuthentication: true` to get an authenticated endpoint URL:
+
+```typescript
+const downloadUrl = client.mxcUrlToHttp(
+    /*mxcUrl=*/        "mxc://example.org/abc123",
+    /*width=*/         undefined,
+    /*height=*/        undefined,
+    /*resizeMethod=*/  undefined,
+    /*allowDirectLinks=*/ false,
+    /*allowRedirects=*/   true,   // implied when useAuthentication is true
+    /*useAuthentication=*/ true,
+);
+// → "https://matrix.example.org/_matrix/client/v1/media/download/example.org/abc123"
+```
+
+### Making the authenticated request
+
+In Node.js, or wherever you control the fetch call, append the `Authorization` header:
+
+```typescript
+const img = await fetch(downloadUrl, {
+    headers: {
+        Authorization: `Bearer ${client.getAccessToken()}`,
+    },
+});
+// Do something with `img`.
+```
+
+### Authenticated thumbnails
+
+Authenticated media works with thumbnails too:
+
+```typescript
+const thumbUrl = client.mxcUrlToHttp(
+    mxcUri,
+    /*width=*/  400,
+    /*height=*/ 300,
+    /*resizeMethod=*/ "crop",
+    /*allowDirectLinks=*/ false,
+    /*allowRedirects=*/ true,
+    /*useAuthentication=*/ true,
+);
+// → "https://matrix.example.org/_matrix/client/v1/media/thumbnail/..."
+
+const thumb = await fetch(thumbUrl, {
+    headers: { Authorization: `Bearer ${client.getAccessToken()}` },
+});
+```
+
+## Service Workers for browser authenticated media
+
+In browsers, HTML elements such as `<img>` and `<video>` do not allow you to set request headers. To use authenticated media in these contexts you need a [Service Worker](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API) that intercepts requests and appends the `Authorization` header automatically.
+
+<Info>
+Element Web uses this pattern via the `matrix-content-scanner` and a custom Service Worker. The matrix-js-sdk itself does not bundle a Service Worker — you must implement one appropriate for your application's authentication model.
+</Info>
+
+A minimal example Service Worker:
+
+```javascript
+// service-worker.js
+self.addEventListener("fetch", (event) => {
+    const url = new URL(event.request.url);
+
+    // Only intercept authenticated Matrix media endpoints
+    if (!url.pathname.startsWith("/_matrix/client/v1/media/")) return;
+
+    event.respondWith(
+        (async () => {
+            const token = await getAccessToken(); // retrieve from IndexedDB / cache
+            return fetch(event.request, {
+                headers: {
+                    ...Object.fromEntries(event.request.headers.entries()),
+                    Authorization: `Bearer ${token}`,
+                },
+            });
+        })(),
+    );
+});
+```
+
+Register it from your app:
+
+```typescript
+if ("serviceWorker" in navigator) {
+    await navigator.serviceWorker.register("/service-worker.js");
+}
+```
+
+## Animated media
+
+Pass `animated: true` to request an animated thumbnail (e.g. animated GIF or WebP) if the server supports it:
+
+```typescript
+const animatedUrl = client.mxcUrlToHttp(
+    mxcUri,
+    128,
+    128,
+    "crop",
+    false,
+    undefined,
+    undefined,
+    true, // animated
+);
+```
+
+## MXC URI validation
+
+The SDK validates MXC URIs before constructing URLs. An invalid MXC (malformed server name, invalid media ID characters, extra path segments) will return an empty string:
+
+```typescript
+client.mxcUrlToHttp("mxc://invalid server!"); // → ""
+client.mxcUrlToHttp("");                       // → ""
+client.mxcUrlToHttp(undefined);                // → ""
+```
+
+Always check the return value before using it:
+
+```typescript
+const url = client.mxcUrlToHttp(avatarUrl);
+if (url) {
+    imgElement.src = url;
+}
+```
+
+## Parameter reference
+
+<Accordion title="mxcUrlToHttp() / getHttpUriForMxc() parameters">
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `mxc` | `string` | — | The `mxc://` URI to resolve |
+| `width` | `number` | `undefined` | Desired thumbnail width in pixels |
+| `height` | `number` | `undefined` | Desired thumbnail height in pixels |
+| `resizeMethod` | `string` | `undefined` | `"scale"` or `"crop"` |
+| `allowDirectLinks` | `boolean` | `false` | Return non-`mxc://` URLs as-is (leaks info) |
+| `allowRedirects` | `boolean` | `undefined` | Indicates the caller supports HTTP redirects |
+| `useAuthentication` | `boolean` | `false` | Use the authenticated `/_matrix/client/v1/media/` endpoint |
+| `animated` | `boolean` | `undefined` | Request an animated thumbnail |
+
+</Accordion>
